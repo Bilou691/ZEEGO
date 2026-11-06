@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.7';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.8';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -710,35 +710,31 @@ async function blePair() {
     const password = crypto.getRandomValues(new Uint8Array(16));
     log('\nSi la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
 
+    // Un seul envoi de SET_PWD, puis on écoute passivement jusqu'à 20 s sans RIEN renvoyer
+    // (renvoyer le message, comme une appli le ferait pour « insister », fait couper la liaison).
     let ctr = 2;
     while (vi < variants.length) {
       const v = variants[vi];
       const keySet = await nbKey(new TextEncoder().encode(name), v.key2);
       const req = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
-      log(`\n→ SET_PWD [${v.label}] (compteur ${ctr}) : ` + toHex(req));
+      log(`\n→ SET_PWD [${v.label}] (compteur ${ctr}, un seul envoi) : ` + toHex(req));
       rxBuf = [];
       await nbSend(id, req, log, NUS, chunk); // une coupure ici remonte au bloc try englobant (reconnexion)
       const myCtr = ctr; ctr++;
-      const respSet = await nbWait(() => rxBuf, 2500);
-      if (!respSet) { log('  (pas de réponse à cette variante)'); vi++; continue; }
-      const r = await nbOpenSN(keySet, Uint8Array.from(respSet), myCtr, v.nonceAuth);
-      if (!r.ok) { log('  réponse reçue mais non déchiffrable avec cette variante'); vi++; continue; }
-      log(`← Réponse déchiffrée avec « ${v.label} » ✓ INDEX=${r.pt[6]}`);
-      found = v; // la bonne variante est identifiée, qu'elle soit acceptée ou en attente
-      if (r.pt[6]) { // acceptée tout de suite
-        return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr, chunk };
+      const t0 = Date.now(); let accepted = null;
+      while (Date.now() - t0 < 20000) { // jusqu'à 20 s, en silence, comme SHU
+        const resp = await nbWait(() => rxBuf, 500);
+        if (!resp) continue;
+        const r = await nbOpenSN(keySet, Uint8Array.from(resp), myCtr, v.nonceAuth);
+        rxBuf = [];
+        if (!r.ok) continue; // notification non liée à cette variante
+        log(`← Réponse déchiffrée avec « ${v.label} » ✓ INDEX=${r.pt[6]}`);
+        found = v;
+        if (r.pt[6]) { accepted = true; break; }
       }
-      // en attente de confirmation : on insiste avec LA MÊME variante, compteur croissant
-      for (let essai = 0; essai < 20; essai++) {
-        const req2 = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
-        rxBuf = []; await nbSend(id, req2, log, NUS, chunk);
-        const c2 = ctr; ctr++;
-        const r2 = await nbWait(() => rxBuf, 2000);
-        if (!r2) { log('  (en attente…)'); continue; }
-        const o2 = await nbOpenSN(keySet, Uint8Array.from(r2), c2, v.nonceAuth);
-        if (o2.ok && o2.pt[6]) { log('← SET_PWD : accepté ✓'); return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr: c2 + 1, chunk }; }
-      }
-      log('  pas de confirmation reçue sur cette variante dans le temps imparti');
+      if (accepted) return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr, chunk };
+      if (!found || found !== v) log('  pas de réponse à cette variante');
+      else log('  pas de confirmation reçue dans les 20 s');
       vi++;
     }
     return null;
