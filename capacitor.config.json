@@ -1,5 +1,7 @@
 {
   "appId": "fr.trotti.app",
   "appName": "Trotti",
-  "webDir": "www"
+  "webDir": "www",
+  "backgroundColor": "#0b1220",
+  "android": { "backgroundColor": "#0b1220" }
 }
