@@ -298,7 +298,7 @@ async function computeRoute(fit) {
 }
 function fitRoute() {
   const c = route.coords, b = c.reduce((b, p) => b.extend(p), new maplibregl.LngLatBounds(c[0], c[0]));
-  map.fitBounds(b, { padding: { top: 100, bottom: 330, left: 50, right: 50 }, duration: 900, pitch: 0, bearing: 0, maxZoom: 17 });
+  map.fitBounds(b, { padding: { top: 100, bottom: 330, left: 50, right: 100 }, duration: 900, pitch: 0, bearing: 0, maxZoom: 17 });
 }
 function reportsNearRoute() {
   if (!route) return 0;
