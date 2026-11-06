@@ -5,7 +5,7 @@
 // Si le code reçu plante au démarrage, on revient automatiquement à la version embarquée.
 (() => {
   const SHELL_REV = 2;          // révision du « socle » (APK) : à incrémenter si boot.js / index.html / Android changent
-  const BUNDLED_V = '1.4.1';    // version de app.js + style.css embarqués dans l'APK
+  const BUNDLED_V = '1.4.2';    // version de app.js + style.css embarqués dans l'APK
   const BASE = 'https://raw.githubusercontent.com/Bilou691/ZEEGO/main/www/';
   const KEY = 'trotti.bundle', TRIED = 'trotti.badbundle';
 

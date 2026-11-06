@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.1';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.2';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -537,13 +537,13 @@ async function nbKey(k1, k2) { // SHA-1(k1 ‖ k2)[0:16], k2 nul = 16 octets à 
   const c = new Uint8Array(32); c.set(pad16(k1)); if (k2) c.set(pad16(k2), 16);
   return new Uint8Array(await crypto.subtle.digest('SHA-1', c)).slice(0, 16);
 }
-async function nbSeal(key, pt) { // mode sans compteur : même flux pour chaque bloc, somme de contrôle en queue
-  const ks = key ? await aesBlock(key, new Uint8Array(16)) : new Uint8Array(16), out = new Uint8Array(pt.length + 6); out.set(pt.slice(0, 3)); let sum = 0;
+async function nbSeal(key, pt, ecb) { // mode sans compteur : même flux pour chaque bloc, somme de contrôle en queue
+  const ks = key ? await aesBlock(key, ecb || new Uint8Array(16)) : new Uint8Array(16), out = new Uint8Array(pt.length + 6); out.set(pt.slice(0, 3)); let sum = 0;
   for (let i = 3; i < pt.length; i++) { sum += pt[i]; out[i] = pt[i] ^ ks[(i - 3) % 16]; }
   const cs = ~sum & 0xFFFF; out[pt.length + 2] = cs & 255; out[pt.length + 3] = cs >> 8; return out;
 }
-async function nbOpen(key, ct) {
-  const n = ct.length - 6, ks = await aesBlock(key, new Uint8Array(16)), pt = new Uint8Array(n); pt.set(ct.slice(0, 3)); let sum = 0;
+async function nbOpen(key, ct, ecb) {
+  const n = ct.length - 6, ks = await aesBlock(key, ecb || new Uint8Array(16)), pt = new Uint8Array(n); pt.set(ct.slice(0, 3)); let sum = 0;
   for (let i = 3; i < n; i++) { pt[i] = ct[i] ^ ks[(i - 3) % 16]; sum += pt[i]; }
   return { pt, ok: (ct[n + 2] | ct[n + 3] << 8) === (~sum & 0xFFFF) };
 }
@@ -572,10 +572,12 @@ async function bleLink() {
     }
     await sleep(600);
     const k1 = new TextEncoder().encode(name);
-    const variants = [['clé 2 = zéros', await nbKey(k1, null)], ['clé 2 = fw_data', await nbKey(k1, NB_FW)], ['sans chiffrement', null]];
+    const k0 = await nbKey(k1, null), kf = await nbKey(k1, NB_FW);
+    const variants = [['Gen2 (flux=AES(fw_data))', k0, NB_FW], ['Gen3 (flux=AES(0))', k0, null], ['clé 2=fw, flux=AES(fw)', kf, NB_FW], ['clé 2=fw, flux=AES(0)', kf, null], ['sans chiffrement', null, null]];
+    try { log('Appairé (bond) : ' + (await BLE.isBonded({ deviceId: id })).value); } catch {}
     let got = false;
-    outer: for (const ch of [[NB.svc, NB.tx, 'NB-0002'], [NUS.svc, NUS.tx, 'NUS-0002']]) for (const sync of [0xA5, 0xB5]) for (const [label, key] of variants) {
-      const plain = Uint8Array.from([0x5A, sync, 0x00, 0x3E, 0x04, 0x5B, 0x00]), tx = await nbSeal(key, plain);
+    outer: for (const ch of [[NB.svc, NB.tx, 'NB-0002'], [NUS.svc, NUS.tx, 'NUS-0002']]) for (const sync of ch[2] === 'NB-0002' ? [0xA5, 0xB5] : [0xA5]) for (const [label, key, ecb] of variants) {
+      const plain = Uint8Array.from([0x5A, sync, 0x00, 0x3E, 0x04, 0x5B, 0x00]), tx = await nbSeal(key, plain, ecb);
       rx = []; log(`\n→ ${ch[2]} sync ${sync.toString(16)} ${label} : ${toHex(tx)}`);
       try { await BLE.write({ deviceId: id, service: ch[0], characteristic: ch[1], value: toHex(tx), timeout: 5000 }); } catch (e) { log('  écriture refusée : ' + (e.message || e.errorMessage || e)); continue; }
       const t0 = Date.now(); while (Date.now() - t0 < 1800 && !(rx.length >= 3 && rx.length >= rx[2] + 13)) await sleep(50);
@@ -583,7 +585,7 @@ async function bleLink() {
       log(`← ${rx.length} octets`);
       if (toHex(rx) === toHex(tx)) { log('  écho de la requête'); continue; }
       if (rx.length >= 13 && key) {
-        const { pt, ok } = await nbOpen(key, Uint8Array.from(rx));
+        const { pt, ok } = await nbOpen(key, Uint8Array.from(rx), ecb);
         log(`  déchiffrement : ${ok ? 'OK ✓' : 'somme de contrôle fausse ✗'}  clair : ${toHex(pt)}`);
         if (ok && pt.length >= 37) { log(`  INDEX = ${pt[6]} → ${pt[6] ? 'mot de passe déjà enregistré' : 'aucun mot de passe enregistré'}\n  auth : ${toHex(pt.slice(7, 23))}\n  série : « ${hexAscii(toHex(pt.slice(23, 37)))} »`); got = true; break outer; }
       }
