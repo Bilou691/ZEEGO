@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.5';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.6';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -673,16 +673,18 @@ async function blePair() {
   const log = t => { lines.push(t); pre.textContent = lines.join('\n'); pre.scrollTop = pre.scrollHeight; };
   m.querySelector('#bleCopy').onclick = async e => { try { await navigator.clipboard.writeText(lines.join('\n')); e.target.textContent = 'Rapport copié ✓'; } catch { e.target.textContent = 'Copie impossible : fais une capture'; } };
   if (!BLE) return log('Bluetooth indisponible : installe la dernière version de l’APK Trotti.');
-  let id, rxBuf = [];
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  try {
-    await BLE.initialize({ androidNeverForLocation: true });
-    log('Choisis ta trottinette…');
-    const dev = await BLE.requestDevice({}); id = dev.deviceId; const name = dev.name || '';
-    log(`Appareil : ${name}  [${id}]`);
+
+  // La variante de clé qui fonctionne pour SET_PWD n'est pas documentée avec certitude pour ce
+  // modèle (seule celle de PRE_COMM a été confirmée empiriquement) ; on essaie plusieurs
+  // combinaisons raisonnables, sur des connexions fraîches si la trottinette coupe la liaison.
+  let variants = null; // rempli après PRE_COMM (dépend de authParam/serial reçus)
+  let vi = 0, found = null;
+
+  async function oneConnection(id, name) {
+    let rxBuf = [];
     await BLE.connect({ deviceId: id, timeout: 15000 }); log('Connecté ✓');
     await BLE.getServices({ deviceId: id });
-    // Canal qui a répondu lors du dernier test de liaison (service standard « Nordic UART »).
     BLE.addListener(`notification|${id}|${NUS.svc}|${NUS.rx}`, ev => rxBuf.push(...fromHex(ev.value)));
     await BLE.startNotifications({ deviceId: id, service: NUS.svc, characteristic: NUS.rx });
 
@@ -691,49 +693,99 @@ async function blePair() {
     rxBuf = []; const reqPre = await nbSeal(keyPre, await nbFrame(BOARD_BLE, 0x5B, 0x00), NB_FW);
     log('\n→ PRE_COMM : ' + toHex(reqPre)); await nbSend(id, reqPre, log, NUS);
     let resp = await nbWait(() => rxBuf, 3000);
-    if (!resp) return log('\nPas de réponse à PRE_COMM. Relance l’essai.');
+    if (!resp) { log('Pas de réponse à PRE_COMM.'); return null; }
     let { pt, ok } = await nbOpen(keyPre, Uint8Array.from(resp), NB_FW);
-    if (!ok) return log('\nPRE_COMM : somme de contrôle invalide. Relance l’essai.');
-    const authParam = pt.slice(7, 23), hasPwd = pt[6] !== 0;
+    if (!ok) { log('PRE_COMM : somme de contrôle invalide.'); return null; }
+    const authParam = pt.slice(7, 23), serial8 = pt.slice(23, 31), hasPwd = pt[6] !== 0;
     log(`← PRE_COMM OK · mot de passe déjà enregistré : ${hasPwd ? 'oui' : 'non'}`);
-
-    // --- SET_PWD : enregistre un nouveau mot de passe de session (16 octets aléatoires) ---
+    if (!variants) variants = [
+      { label: 'clé = auth, nonce = auth', key2: authParam, nonceAuth: authParam },
+      { label: 'clé = fixe, nonce = auth', key2: NB_FW, nonceAuth: authParam },
+      { label: 'clé = auth, nonce = série', key2: authParam, nonceAuth: serial8 },
+      { label: 'clé = fixe, nonce = série', key2: NB_FW, nonceAuth: serial8 }
+    ];
     const password = crypto.getRandomValues(new Uint8Array(16));
-    const keySet = await nbKey(new TextEncoder().encode(name), authParam);
     log('\nSi la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
-    let accepted = false, pending = false, ctr = 2, fails = 0;
-    for (let essai = 0; essai < 30 && !accepted; essai++) { // ré-émet toutes les 2 s (comme l'appli officielle), jusqu'à ~60 s
-      // Le compteur anti-rejeu doit augmenter à chaque envoi : on rechiffre une trame neuve à chaque tentative.
-      const req = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, authParam);
-      if (essai === 0) log('\n→ SET_PWD (compteur ' + ctr + ') : ' + toHex(req));
-      rxBuf = [];
-      try { await nbSend(id, req, log, NUS); fails = 0; }
-      catch (e) { if (++fails >= 3) { return log('\nÉcriture refusée à plusieurs reprises : ' + (e.message || e.errorMessage || e)); } log('  (écriture refusée, nouvel essai…)'); ctr++; continue; }
-      const resp = await nbWait(() => rxBuf, 2000);
-      const myCtr = ctr; ctr++;
-      if (!resp) { log('  (en attente…)'); continue; }
-      const r = await nbOpenSN(keySet, Uint8Array.from(resp), myCtr, authParam);
-      if (!r.ok) { log('  réponse non déchiffrable'); continue; }
-      if (r.pt[6]) { accepted = true; ctr = myCtr + 1; log('← SET_PWD : accepté ✓'); }
-      else if (!pending) { pending = true; log('← SET_PWD : en attente de ta confirmation sur la trottinette…'); }
-    }
-    if (!accepted) return log('\nSET_PWD non confirmé en 60 s. Relance l’essai.');
 
-    // --- AUTH : ouvre la session avec le nouveau mot de passe ---
-    const keyAuth = await nbKey(password, authParam);
-    rxBuf = []; const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(hexAscii(toHex(pt.slice(23, 37))))), ctr, authParam);
-    log('\n→ AUTH (compteur ' + ctr + ') : ' + toHex(reqAuth)); await nbSend(id, reqAuth, log, NUS);
-    resp = await nbWait(() => rxBuf, 3000);
-    if (!resp) return log('\nPas de réponse à AUTH.');
-    const ra = await nbOpenSN(keyAuth, Uint8Array.from(resp), ctr, authParam);
-    log(`← AUTH : ${ra.ok ? 'déchiffré' : 'non déchiffrable'}${ra.ok ? ', INDEX=' + ra.pt[6] : ''}`);
-    if (ra.ok && ra.pt[6]) {
-      log('\nSession ouverte ✓ Enregistrement de la clé pour les prochaines fois…');
-      store.set('scooter', { name, id, password: toHex(password), authParam: toHex(authParam), counter: 4 });
-      log('Trotti peut maintenant lire les informations de ta trottinette.');
-    } else log('\nAUTH refusé. Relance l’essai.');
+    let ctr = 2;
+    while (vi < variants.length) {
+      const v = variants[vi];
+      const keySet = await nbKey(new TextEncoder().encode(name), v.key2);
+      const req = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
+      log(`\n→ SET_PWD [${v.label}] (compteur ${ctr}) : ` + toHex(req));
+      rxBuf = [];
+      await nbSend(id, req, log, NUS); // une coupure ici remonte au bloc try englobant (reconnexion)
+      const myCtr = ctr; ctr++;
+      const respSet = await nbWait(() => rxBuf, 2500);
+      if (!respSet) { log('  (pas de réponse à cette variante)'); vi++; continue; }
+      const r = await nbOpenSN(keySet, Uint8Array.from(respSet), myCtr, v.nonceAuth);
+      if (!r.ok) { log('  réponse reçue mais non déchiffrable avec cette variante'); vi++; continue; }
+      log(`← Réponse déchiffrée avec « ${v.label} » ✓ INDEX=${r.pt[6]}`);
+      found = v; // la bonne variante est identifiée, qu'elle soit acceptée ou en attente
+      if (r.pt[6]) { // acceptée tout de suite
+        return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr };
+      }
+      // en attente de confirmation : on insiste avec LA MÊME variante, compteur croissant
+      for (let essai = 0; essai < 20; essai++) {
+        const req2 = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
+        rxBuf = []; await nbSend(id, req2, log, NUS);
+        const c2 = ctr; ctr++;
+        const r2 = await nbWait(() => rxBuf, 2000);
+        if (!r2) { log('  (en attente…)'); continue; }
+        const o2 = await nbOpenSN(keySet, Uint8Array.from(r2), c2, v.nonceAuth);
+        if (o2.ok && o2.pt[6]) { log('← SET_PWD : accepté ✓'); return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr: c2 + 1 }; }
+      }
+      log('  pas de confirmation reçue sur cette variante dans le temps imparti');
+      vi++;
+    }
+    return null;
+  }
+
+  let result = null, id = null, name = '';
+  try {
+    await BLE.initialize({ androidNeverForLocation: true });
+    log('Choisis ta trottinette…');
+    const dev = await BLE.requestDevice({}); id = dev.deviceId; name = dev.name || '';
+    log(`Appareil : ${name}  [${id}]`);
+    for (let reconnect = 0; reconnect < 5 && !result; reconnect++) {
+      if (reconnect > 0) log(`\nLa trottinette a coupé la liaison — nouvelle connexion (essai ${reconnect + 1})…`);
+      try {
+        const r = await oneConnection(id, name);
+        if (r && typeof r === 'object') result = r;
+        else if (vi >= (variants ? variants.length : 1)) break;
+        else await sleep(800);
+      } catch (e) {
+        log('  (' + (e.message || e.errorMessage || e) + ')');
+        await sleep(1200);
+      }
+    }
   } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e))); }
-  finally { if (id) { try { await BLE.disconnect({ deviceId: id }); log('Déconnecté.'); } catch {} } m.querySelector('#bleCopy').hidden = false; }
+
+  if (!result) {
+    log(found ? '\nUne variante a été identifiée mais pas confirmée. Relance l’essai, la même sera réessayée en premier.' : '\nAucune des variantes essayées n’a obtenu de réponse exploitable. Envoie-moi ce rapport.');
+  } else {
+    try {
+      const { authParam, serial, password, variant, ctr } = result;
+      const keyAuth = await nbKey(password, variant.key2);
+      const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(serial)), ctr, variant.nonceAuth);
+      log('\n→ AUTH (compteur ' + ctr + ') : ' + toHex(reqAuth));
+      let rxA = []; BLE.addListener(`notification|${id}|${NUS.svc}|${NUS.rx}`, ev => rxA.push(...fromHex(ev.value)));
+      await nbSend(id, reqAuth, log, NUS);
+      const respA = await nbWait(() => rxA, 3000);
+      if (!respA) log('\nPas de réponse à AUTH.');
+      else {
+        const ra = await nbOpenSN(keyAuth, Uint8Array.from(respA), ctr, variant.nonceAuth);
+        log(`← AUTH : ${ra.ok ? 'déchiffré' : 'non déchiffrable'}${ra.ok ? ', INDEX=' + ra.pt[6] : ''}`);
+        if (ra.ok && ra.pt[6]) {
+          log('\nSession ouverte ✓ Enregistrement de la clé pour les prochaines fois…');
+          store.set('scooter', { name: result.name, id, password: toHex(password), authParam: toHex(authParam), variant: variant.label, counter: ctr + 1 });
+          log('Trotti peut maintenant lire les informations de ta trottinette.');
+        } else log('\nAUTH refusé.');
+      }
+    } catch (e) { log('\nErreur pendant AUTH : ' + (e.message || e.errorMessage || e)); }
+  }
+  if (id) { try { await BLE.disconnect({ deviceId: id }); log('Déconnecté.'); } catch {} }
+  m.querySelector('#bleCopy').hidden = false;
 }
 
 // ---------- signalements ----------
