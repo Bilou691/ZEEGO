@@ -1,5 +1,5 @@
 {
-  "v": "1.4.8",
+  "v": "1.4.9",
   "minShell": 1,
   "apk": { "rev": 2, "v": "1.4.3", "url": "https://github.com/Bilou691/ZEEGO/raw/main/Trotti.apk" },
   "files": ["app.js", "style.css"]

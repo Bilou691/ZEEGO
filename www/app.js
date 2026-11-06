@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.8';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.9';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -708,7 +708,6 @@ async function blePair() {
       { label: 'clé = fixe, nonce = série', key2: NB_FW, nonceAuth: serial8 }
     ];
     const password = crypto.getRandomValues(new Uint8Array(16));
-    log('\nSi la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
 
     // Un seul envoi de SET_PWD, puis on écoute passivement jusqu'à 20 s sans RIEN renvoyer
     // (renvoyer le message, comme une appli le ferait pour « insister », fait couper la liaison).
@@ -717,7 +716,8 @@ async function blePair() {
       const v = variants[vi];
       const keySet = await nbKey(new TextEncoder().encode(name), v.key2);
       const req = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
-      log(`\n→ SET_PWD [${v.label}] (compteur ${ctr}, un seul envoi) : ` + toHex(req));
+      log(`\n→ SET_PWD [${v.label}] (compteur ${ctr}, un seul envoi)`);
+      log('Appuie UNE FOIS sur le bouton d’allumage, maintenant…');
       rxBuf = [];
       await nbSend(id, req, log, NUS, chunk); // une coupure ici remonte au bloc try englobant (reconnexion)
       const myCtr = ctr; ctr++;
