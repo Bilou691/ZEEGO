@@ -168,3 +168,5 @@ body[data-s=ride] #toast{top:calc(var(--sa-t) + 104px)}
 .tog input{appearance:none;-webkit-appearance:none;width:52px;height:30px;border-radius:15px;background:var(--chip);position:relative;transition:background .2s;flex:none;border:1px solid var(--bd)}
 .tog input::after{content:'';position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.35);transition:transform .2s}
 .tog input:checked{background:var(--grad);border-color:transparent}.tog input:checked::after{transform:translateX(22px)}
+
+.blelog{background:var(--chip);border-radius:16px;padding:12px;margin:10px 0 0;font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace;max-height:46vh;overflow:auto;white-space:pre-wrap;word-break:break-all;user-select:text;color:var(--fg)}

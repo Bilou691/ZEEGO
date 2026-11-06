@@ -4,8 +4,8 @@
 // téléchargée en arrière-plan et appliquée aussitôt, sauf pendant un trajet.
 // Si le code reçu plante au démarrage, on revient automatiquement à la version embarquée.
 (() => {
-  const SHELL_REV = 1;          // révision du « socle » (APK) : à incrémenter si boot.js / index.html / Android changent
-  const BUNDLED_V = '1.1.0';    // version de app.js + style.css embarqués dans l'APK
+  const SHELL_REV = 2;          // révision du « socle » (APK) : à incrémenter si boot.js / index.html / Android changent
+  const BUNDLED_V = '1.3.0';    // version de app.js + style.css embarqués dans l'APK
   const BASE = 'https://raw.githubusercontent.com/Bilou691/ZEEGO/main/www/';
   const KEY = 'trotti.bundle', TRIED = 'trotti.badbundle';
 
@@ -45,13 +45,13 @@
         return json ? r.json() : r.text();
       };
       const rv = await get('version.json', true);
+      let res = 'none';
       if (rv.apk && rv.apk.rev > SHELL_REV) {                       // nouveau socle : il faut réinstaller l'APK
         boot.apk = { v: rv.apk.v, url: rv.apk.url };
         window.dispatchEvent(new CustomEvent('trotti-update', { detail: { type: 'apk', ...boot.apk } }));
-        return 'apk';
+        res = 'apk';
       }
-      if (cmp(rv.v, boot.version) <= 0 || rv.v === localStorage.getItem('trotti.badv')) return 'none';                // déjà à jour
-      if ((rv.minShell || 1) > SHELL_REV) return 'none';
+      if (cmp(rv.v, boot.version) <= 0 || rv.v === localStorage.getItem('trotti.badv') || (rv.minShell || 1) > SHELL_REV) return res; // déjà à jour
       const [js, css] = await Promise.all([get('app.js'), get('style.css')]);
       if (js.length < 2000 || css.length < 200) throw new Error('bundle incomplet');
       localStorage.setItem(KEY, JSON.stringify({ v: rv.v, js, css }));

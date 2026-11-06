@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.1.0';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.3.0';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -463,14 +463,59 @@ $('statsBtn').onclick = () => {
   const m = openModal(`<h3>Mes kilomètres</h3>
     <div class="bigstat"><div class="hero"><b>${fmtKm(t.km * 1000)} km</b><small>Total en trottinette</small></div>
     <div><b>${t.rides}</b><small>Trajets</small></div><div><b>${t.secs >= 3600 ? Math.floor(t.secs / 3600) + ' h ' + pad(Math.floor(t.secs % 3600 / 60)) : Math.floor(t.secs / 60) + ' min'}</b><small>Sur la route</small></div></div>
+    <button class="btn sec" id="bleBtn" style="margin-bottom:10px">🔵 Connecter ma trottinette (Bluetooth)</button>
     <div class="about">Trotti v${V} · Cartes © OpenStreetMap, © CARTO · Itinéraires Valhalla · Adresses Photon</div>
     <button class="btn sec" id="chk" style="margin-bottom:10px">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`);
+  m.querySelector('#bleBtn').onclick = () => bleDiag();
   m.querySelector('#chk').onclick = async e => {
     e.target.textContent = 'Vérification…';
     const r = await (window.TrottiBoot && TrottiBoot.check ? TrottiBoot.check() : 'none');
     e.target.textContent = r === 'web' ? 'Mise à jour téléchargée ✓' : r === 'apk' ? 'Nouvelle version de l’appli disponible' : r === 'offline' ? 'Pas de connexion' : 'Trotti est à jour ✓';
   };
 };
+
+// ---------- Bluetooth : ma trottinette (étape 1 : diagnostic, lecture seule) ----------
+// Rien n'est écrit sur la trottinette : on liste ce qu'elle expose, on lit les infos
+// standard (nom, fabricant, modèle, firmware) et on écoute ce qu'elle émet 10 secondes.
+const BLE = window.Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('BluetoothLe') ? Capacitor.registerPlugin('BluetoothLe') : null;
+const hexAscii = h => (h.match(/../g) || []).map(b => parseInt(b, 16)).map(c => c >= 32 && c < 127 ? String.fromCharCode(c) : '·').join('');
+const flags = p => Object.entries(p || {}).filter(([, v]) => v).map(([k]) => k).join(',');
+async function bleDiag() {
+  const m = openModal(`<h3>🔵 Ma trottinette</h3><div class="about" style="margin-top:-6px">Allume ta trottinette, ferme l’appli Segway, puis choisis-la dans la liste. Rien n’est modifié sur la trottinette.</div>
+    <pre id="bleLog" class="blelog"></pre>
+    <button class="btn sec" id="bleCopy" style="margin:10px 0" hidden>Copier le rapport</button><button class="btn main" data-close>Fermer</button>`);
+  const pre = m.querySelector('#bleLog'), lines = [`Trotti v${V} · ${new Date().toLocaleString('fr-FR')}`];
+  const log = t => { lines.push(t); pre.textContent = lines.join('\n'); pre.scrollTop = pre.scrollHeight; };
+  m.querySelector('#bleCopy').onclick = async e => { try { await navigator.clipboard.writeText(lines.join('\n')); e.target.textContent = 'Rapport copié ✓'; } catch { e.target.textContent = 'Copie impossible : fais une capture'; } };
+  if (!BLE) return log('Bluetooth indisponible : installe la dernière version de l’APK Trotti.');
+  let id;
+  try {
+    await BLE.initialize({ androidNeverForLocation: true });
+    log('Bluetooth prêt. Choisis ta trottinette…');
+    const dev = await BLE.requestDevice({});
+    id = dev.deviceId; log(`Appareil : ${dev.name || '(sans nom)'}  [${id}]`);
+    await BLE.connect({ deviceId: id, timeout: 15000 }); log('Connecté ✓');
+    const { services } = await BLE.getServices({ deviceId: id }), notif = [];
+    for (const sv of services) {
+      log(`\nService ${sv.uuid}`);
+      for (const c of sv.characteristics) {
+        log(`  ${c.uuid}  [${flags(c.properties)}]`);
+        if (c.properties && (c.properties.notify || c.properties.indicate)) notif.push([sv.uuid, c.uuid]);
+        if (/^0000(1800|180a)-/i.test(sv.uuid) && c.properties && c.properties.read) {
+          try { const r = await BLE.read({ deviceId: id, service: sv.uuid, characteristic: c.uuid, timeout: 4000 }); log(`    = ${r.value}  « ${hexAscii(r.value)} »`); } catch (e) { log('    (lecture refusée)'); }
+        }
+      }
+    }
+    log(`\nÉcoute ${notif.length} canal(aux) pendant 10 s…`);
+    for (const [s, c] of notif) {
+      BLE.addListener(`notification|${id}|${s.toLowerCase()}|${c.toLowerCase()}`, ev => log(`« ${c.slice(4, 8)} ${ev.value}`));
+      try { await BLE.startNotifications({ deviceId: id, service: s, characteristic: c }); } catch (e) { log(`  abonnement ${c.slice(4, 8)} refusé`); }
+    }
+    await new Promise(r => setTimeout(r, 10000));
+    log('\nFin du diagnostic ✓');
+  } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e))); }
+  finally { if (id) { try { await BLE.disconnect({ deviceId: id }); log('Déconnecté.'); } catch {} } m.querySelector('#bleCopy').hidden = false; }
+}
 
 // ---------- signalements ----------
 let cache = [];
