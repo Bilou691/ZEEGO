@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.6';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.7';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -658,8 +658,9 @@ async function nbFrame(target, cmd, index, data) {
   f[0] = 0x5A; f[1] = 0xA5; f[2] = d.length; f[3] = 0x3E; f[4] = target; f[5] = cmd; f[6] = index; f.set(d, 7);
   return f;
 }
-async function nbSend(id, tx, log, svc) {
-  for (let o = 0; o < tx.length; o += 20) { await BLE.write({ deviceId: id, service: svc.svc, characteristic: svc.tx, value: toHex(tx.slice(o, o + 20)), timeout: 5000 }); await new Promise(r => setTimeout(r, 12)); }
+async function nbSend(id, tx, log, svc, chunk) { // envoie en un seul morceau quand la taille négociée le permet (certaines trottinettes ignorent un message fragmenté)
+  const c = chunk || 20;
+  for (let o = 0; o < tx.length; o += c) { await BLE.write({ deviceId: id, service: svc.svc, characteristic: svc.tx, value: toHex(tx.slice(o, o + c)), timeout: 5000 }); if (o + c < tx.length) await new Promise(r => setTimeout(r, 12)); }
 }
 async function nbWait(getBuf, ms) { // attend une trame complète (sync + LENGTH + queue 13 octets)
   const t0 = Date.now();
@@ -684,6 +685,8 @@ async function blePair() {
   async function oneConnection(id, name) {
     let rxBuf = [];
     await BLE.connect({ deviceId: id, timeout: 15000 }); log('Connecté ✓');
+    let chunk = 20;
+    try { chunk = Math.max(20, (await BLE.getMtu({ deviceId: id })).value - 3); log(`MTU : ${chunk + 3} (envoi en un seul morceau jusqu'à ${chunk} octets)`); } catch {}
     await BLE.getServices({ deviceId: id });
     BLE.addListener(`notification|${id}|${NUS.svc}|${NUS.rx}`, ev => rxBuf.push(...fromHex(ev.value)));
     await BLE.startNotifications({ deviceId: id, service: NUS.svc, characteristic: NUS.rx });
@@ -691,7 +694,7 @@ async function blePair() {
     // --- PRE_COMM (variante validée sur cette trottinette le 2026-11-06) ---
     const k1 = new TextEncoder().encode(name), keyPre = await nbKey(k1, NB_FW);
     rxBuf = []; const reqPre = await nbSeal(keyPre, await nbFrame(BOARD_BLE, 0x5B, 0x00), NB_FW);
-    log('\n→ PRE_COMM : ' + toHex(reqPre)); await nbSend(id, reqPre, log, NUS);
+    log('\n→ PRE_COMM : ' + toHex(reqPre)); await nbSend(id, reqPre, log, NUS, chunk);
     let resp = await nbWait(() => rxBuf, 3000);
     if (!resp) { log('Pas de réponse à PRE_COMM.'); return null; }
     let { pt, ok } = await nbOpen(keyPre, Uint8Array.from(resp), NB_FW);
@@ -714,7 +717,7 @@ async function blePair() {
       const req = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
       log(`\n→ SET_PWD [${v.label}] (compteur ${ctr}) : ` + toHex(req));
       rxBuf = [];
-      await nbSend(id, req, log, NUS); // une coupure ici remonte au bloc try englobant (reconnexion)
+      await nbSend(id, req, log, NUS, chunk); // une coupure ici remonte au bloc try englobant (reconnexion)
       const myCtr = ctr; ctr++;
       const respSet = await nbWait(() => rxBuf, 2500);
       if (!respSet) { log('  (pas de réponse à cette variante)'); vi++; continue; }
@@ -723,17 +726,17 @@ async function blePair() {
       log(`← Réponse déchiffrée avec « ${v.label} » ✓ INDEX=${r.pt[6]}`);
       found = v; // la bonne variante est identifiée, qu'elle soit acceptée ou en attente
       if (r.pt[6]) { // acceptée tout de suite
-        return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr };
+        return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr, chunk };
       }
       // en attente de confirmation : on insiste avec LA MÊME variante, compteur croissant
       for (let essai = 0; essai < 20; essai++) {
         const req2 = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, v.nonceAuth);
-        rxBuf = []; await nbSend(id, req2, log, NUS);
+        rxBuf = []; await nbSend(id, req2, log, NUS, chunk);
         const c2 = ctr; ctr++;
         const r2 = await nbWait(() => rxBuf, 2000);
         if (!r2) { log('  (en attente…)'); continue; }
         const o2 = await nbOpenSN(keySet, Uint8Array.from(r2), c2, v.nonceAuth);
-        if (o2.ok && o2.pt[6]) { log('← SET_PWD : accepté ✓'); return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr: c2 + 1 }; }
+        if (o2.ok && o2.pt[6]) { log('← SET_PWD : accepté ✓'); return { name, authParam, serial: hexAscii(toHex(pt.slice(23, 37))), password, variant: v, ctr: c2 + 1, chunk }; }
       }
       log('  pas de confirmation reçue sur cette variante dans le temps imparti');
       vi++;
@@ -765,12 +768,12 @@ async function blePair() {
     log(found ? '\nUne variante a été identifiée mais pas confirmée. Relance l’essai, la même sera réessayée en premier.' : '\nAucune des variantes essayées n’a obtenu de réponse exploitable. Envoie-moi ce rapport.');
   } else {
     try {
-      const { authParam, serial, password, variant, ctr } = result;
+      const { authParam, serial, password, variant, ctr, chunk } = result;
       const keyAuth = await nbKey(password, variant.key2);
       const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(serial)), ctr, variant.nonceAuth);
       log('\n→ AUTH (compteur ' + ctr + ') : ' + toHex(reqAuth));
       let rxA = []; BLE.addListener(`notification|${id}|${NUS.svc}|${NUS.rx}`, ev => rxA.push(...fromHex(ev.value)));
-      await nbSend(id, reqAuth, log, NUS);
+      await nbSend(id, reqAuth, log, NUS, chunk);
       const respA = await nbWait(() => rxA, 3000);
       if (!respA) log('\nPas de réponse à AUTH.');
       else {
