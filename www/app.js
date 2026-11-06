@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.4';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.5';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -700,28 +700,32 @@ async function blePair() {
     // --- SET_PWD : enregistre un nouveau mot de passe de session (16 octets aléatoires) ---
     const password = crypto.getRandomValues(new Uint8Array(16));
     const keySet = await nbKey(new TextEncoder().encode(name), authParam);
-    const reqSet = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), 2, authParam);
-    log('\n→ SET_PWD (compteur 2) : ' + toHex(reqSet));
-    log('Si la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
-    let accepted = false, pending = false;
+    log('\nSi la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
+    let accepted = false, pending = false, ctr = 2, fails = 0;
     for (let essai = 0; essai < 30 && !accepted; essai++) { // ré-émet toutes les 2 s (comme l'appli officielle), jusqu'à ~60 s
-      rxBuf = []; await nbSend(id, reqSet, log, NUS);
+      // Le compteur anti-rejeu doit augmenter à chaque envoi : on rechiffre une trame neuve à chaque tentative.
+      const req = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), ctr, authParam);
+      if (essai === 0) log('\n→ SET_PWD (compteur ' + ctr + ') : ' + toHex(req));
+      rxBuf = [];
+      try { await nbSend(id, req, log, NUS); fails = 0; }
+      catch (e) { if (++fails >= 3) { return log('\nÉcriture refusée à plusieurs reprises : ' + (e.message || e.errorMessage || e)); } log('  (écriture refusée, nouvel essai…)'); ctr++; continue; }
       const resp = await nbWait(() => rxBuf, 2000);
+      const myCtr = ctr; ctr++;
       if (!resp) { log('  (en attente…)'); continue; }
-      const r = await nbOpenSN(keySet, Uint8Array.from(resp), 2, authParam);
+      const r = await nbOpenSN(keySet, Uint8Array.from(resp), myCtr, authParam);
       if (!r.ok) { log('  réponse non déchiffrable'); continue; }
-      if (r.pt[6]) { accepted = true; log('← SET_PWD : accepté ✓'); }
+      if (r.pt[6]) { accepted = true; ctr = myCtr + 1; log('← SET_PWD : accepté ✓'); }
       else if (!pending) { pending = true; log('← SET_PWD : en attente de ta confirmation sur la trottinette…'); }
     }
     if (!accepted) return log('\nSET_PWD non confirmé en 60 s. Relance l’essai.');
 
     // --- AUTH : ouvre la session avec le nouveau mot de passe ---
     const keyAuth = await nbKey(password, authParam);
-    rxBuf = []; const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(hexAscii(toHex(pt.slice(23, 37))))), 3, authParam);
-    log('\n→ AUTH (compteur 3) : ' + toHex(reqAuth)); await nbSend(id, reqAuth, log, NUS);
+    rxBuf = []; const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(hexAscii(toHex(pt.slice(23, 37))))), ctr, authParam);
+    log('\n→ AUTH (compteur ' + ctr + ') : ' + toHex(reqAuth)); await nbSend(id, reqAuth, log, NUS);
     resp = await nbWait(() => rxBuf, 3000);
     if (!resp) return log('\nPas de réponse à AUTH.');
-    const ra = await nbOpenSN(keyAuth, Uint8Array.from(resp), 3, authParam);
+    const ra = await nbOpenSN(keyAuth, Uint8Array.from(resp), ctr, authParam);
     log(`← AUTH : ${ra.ok ? 'déchiffré' : 'non déchiffrable'}${ra.ok ? ', INDEX=' + ra.pt[6] : ''}`);
     if (ra.ok && ra.pt[6]) {
       log('\nSession ouverte ✓ Enregistrement de la clé pour les prochaines fois…');
