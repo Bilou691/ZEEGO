@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.2';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.3';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -465,10 +465,12 @@ $('statsBtn').onclick = () => {
     <div><b>${t.rides}</b><small>Trajets</small></div><div><b>${t.secs >= 3600 ? Math.floor(t.secs / 3600) + ' h ' + pad(Math.floor(t.secs % 3600 / 60)) : Math.floor(t.secs / 60) + ' min'}</b><small>Sur la route</small></div></div>
     <button class="btn sec" id="bleBtn" style="margin-bottom:10px">🔵 Connecter ma trottinette (Bluetooth)</button>
     <button class="btn sec" id="linkBtn" style="margin-bottom:10px">🔐 Tester la liaison chiffrée</button>
+    <button class="btn sec" id="pairBtn" style="margin-bottom:10px">🔑 Associer Trotti à ma trottinette</button>
     <div class="about">Trotti v${V} · Cartes © OpenStreetMap, © CARTO · Itinéraires Valhalla · Adresses Photon</div>
     <button class="btn sec" id="chk" style="margin-bottom:10px">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`);
   m.querySelector('#bleBtn').onclick = () => bleDiag();
   m.querySelector('#linkBtn').onclick = () => bleLink();
+  m.querySelector('#pairBtn').onclick = () => blePair();
   m.querySelector('#chk').onclick = async e => {
     e.target.textContent = 'Vérification…';
     const r = await (window.TrottiBoot && TrottiBoot.check ? TrottiBoot.check() : 'none');
@@ -592,6 +594,139 @@ async function bleLink() {
     }
     log(`\nNotifications reçues au total : ${seen}`);
     log(got ? 'Liaison chiffrée validée ✓ (aucune écriture d’état).' : 'Pas de réponse exploitable : envoie-moi ce rapport.');
+  } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e))); }
+  finally { if (id) { try { await BLE.disconnect({ deviceId: id }); log('Déconnecté.'); } catch {} } m.querySelector('#bleCopy').hidden = false; }
+}
+
+// ---------- Mode SN (compteur) : CTR + CBC-MAC, pour SET_PWD et AUTH ----------
+// Même algorithme que nbSeal/nbOpen mais avec le compteur anti-rejeu (obligatoire
+// une fois la session établie). Vérifié contre une implémentation Python indépendante.
+function nonce13(counter, auth8) {
+  const n = new Uint8Array(13); const dv = new DataView(n.buffer);
+  dv.setUint32(0, counter); n.set(auth8.slice(0, 8), 4); return n;
+}
+async function cbcMac(key, plain, nonce) {
+  const payload = plain.slice(3);
+  const b0 = new Uint8Array(16); b0[0] = 0x59; b0.set(nonce, 1); b0[14] = 0; b0[15] = payload.length & 0xFF;
+  let x = await aesBlock(key, b0);
+  const aad = new Uint8Array(16); aad.set(plain.slice(0, 3));
+  x = await aesBlock(key, xor16(x, aad));
+  for (let o = 0; o < payload.length; o += 16) { const blk = new Uint8Array(16); blk.set(payload.slice(o, o + 16)); x = await aesBlock(key, xor16(x, blk)); }
+  return x.slice(0, 4);
+}
+const xor16 = (a, b) => Uint8Array.from({ length: 16 }, (_, i) => a[i] ^ b[i]);
+async function nbSealSN(key, plain, counter, auth8) {
+  const n = nonce13(counter, auth8), tag = await cbcMac(key, plain, n), payload = plain.slice(3);
+  const ct = new Uint8Array(payload.length);
+  for (let i = 1; i <= Math.ceil(payload.length / 16); i++) {
+    const a = new Uint8Array(16); a[0] = 0x01; a.set(n, 1); a[14] = 0; a[15] = i & 0xFF;
+    const ks = await aesBlock(key, a);
+    for (let j = 0; j < Math.min(16, payload.length - (i - 1) * 16); j++) ct[(i - 1) * 16 + j] = payload[(i - 1) * 16 + j] ^ ks[j];
+  }
+  const a0 = new Uint8Array(16); a0[0] = 0x01; a0.set(n, 1);
+  const encTag = xor16(new Uint8Array([...tag, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), await aesBlock(key, a0)).slice(0, 4);
+  const out = new Uint8Array(plain.length + 6); out.set(plain.slice(0, 3)); out.set(ct, 3); out.set(encTag, 3 + ct.length);
+  out[out.length - 2] = (counter >> 8) & 0xFF; out[out.length - 1] = counter & 0xFF;
+  return out;
+}
+async function nbOpenSN(key, ct, counter, auth8) {
+  const n = nonce13(counter, auth8), bodyLen = ct.length - 9, payloadCt = ct.slice(3, 3 + bodyLen);
+  const pt = new Uint8Array(bodyLen);
+  for (let i = 1; i <= Math.ceil(bodyLen / 16); i++) {
+    const a = new Uint8Array(16); a[0] = 0x01; a.set(n, 1); a[14] = 0; a[15] = i & 0xFF;
+    const ks = await aesBlock(key, a);
+    for (let j = 0; j < Math.min(16, bodyLen - (i - 1) * 16); j++) pt[(i - 1) * 16 + j] = payloadCt[(i - 1) * 16 + j] ^ ks[j];
+  }
+  const plain = new Uint8Array(3 + bodyLen); plain.set(ct.slice(0, 3)); plain.set(pt, 3);
+  const tagCalc = await cbcMac(key, plain, n);
+  const a0 = new Uint8Array(16); a0[0] = 0x01; a0.set(n, 1);
+  const recvTag = xor16(Uint8Array.from([...ct.slice(3 + bodyLen, 3 + bodyLen + 4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), await aesBlock(key, a0)).slice(0, 4);
+  return { pt: plain, ok: toHex(recvTag) === toHex(tagCalc) };
+}
+
+// ---------- Bluetooth : association (étape 2b — SET_PWD puis AUTH) ----------
+// PORTÉE VOLONTAIREMENT LIMITÉE : ce code établit une session pour LIRE des
+// informations (batterie, vitesse, etc.). Il n'implémente AUCUNE commande de
+// contrôle du véhicule (ni déverrouillage, ni réglages, ni mise à jour firmware) —
+// seules les trames PRE_COMM, SET_PWD et AUTH sont envoyées, plus des lectures (CMD 0x01).
+// SET_PWD enregistre un nouveau mot de passe de session sur la trottinette : ça peut
+// nécessiter un appui sur son bouton, et peut obliger à réassocier l'appli Segway
+// officielle ensuite (fonctionnement normal du protocole, pas un bug).
+const BOARD_BLE = 0x04;
+async function nbFrame(target, cmd, index, data) {
+  const d = data || new Uint8Array(0), f = new Uint8Array(7 + d.length);
+  f[0] = 0x5A; f[1] = 0xA5; f[2] = d.length; f[3] = 0x3E; f[4] = target; f[5] = cmd; f[6] = index; f.set(d, 7);
+  return f;
+}
+async function nbSend(id, tx, log) {
+  for (let o = 0; o < tx.length; o += 20) { await BLE.write({ deviceId: id, service: NB.svc, characteristic: NB.tx, value: toHex(tx.slice(o, o + 20)), timeout: 5000 }); await new Promise(r => setTimeout(r, 12)); }
+}
+async function nbWait(getBuf, ms) { // attend une trame complète (sync + LENGTH + queue 13 octets)
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) { const b = getBuf(); if (b.length >= 3 && b.length >= b[2] + 13) return b; await new Promise(r => setTimeout(r, 40)); }
+  return null;
+}
+async function blePair() {
+  const m = openModal(`<h3>🔑 Associer Trotti</h3><div class="about" style="margin-top:-6px">Garde la trottinette allumée et à portée. Un appui bref sur son bouton d’allumage peut être demandé pour confirmer — fais-le dès que le rapport te le dit. L’appli Segway reste utilisable ensuite ; si elle réclame une nouvelle association, c’est normal.</div>
+    <pre id="bleLog" class="blelog"></pre><button class="btn sec" id="bleCopy" style="margin:10px 0" hidden>Copier le rapport</button><button class="btn main" data-close>Fermer</button>`);
+  const pre = m.querySelector('#bleLog'), lines = [`Trotti v${V} · association · ${new Date().toLocaleString('fr-FR')}`];
+  const log = t => { lines.push(t); pre.textContent = lines.join('\n'); pre.scrollTop = pre.scrollHeight; };
+  m.querySelector('#bleCopy').onclick = async e => { try { await navigator.clipboard.writeText(lines.join('\n')); e.target.textContent = 'Rapport copié ✓'; } catch { e.target.textContent = 'Copie impossible : fais une capture'; } };
+  if (!BLE) return log('Bluetooth indisponible : installe la dernière version de l’APK Trotti.');
+  let id, rxBuf = [];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  try {
+    await BLE.initialize({ androidNeverForLocation: true });
+    log('Choisis ta trottinette…');
+    const dev = await BLE.requestDevice({}); id = dev.deviceId; const name = dev.name || '';
+    log(`Appareil : ${name}  [${id}]`);
+    await BLE.connect({ deviceId: id, timeout: 15000 }); log('Connecté ✓');
+    await BLE.getServices({ deviceId: id });
+    BLE.addListener(`notification|${id}|${NB.svc}|${NB.rx}`, ev => rxBuf.push(...fromHex(ev.value)));
+    await BLE.startNotifications({ deviceId: id, service: NB.svc, characteristic: NB.rx });
+
+    // --- PRE_COMM (variante validée sur cette trottinette le 2026-11-06) ---
+    const k1 = new TextEncoder().encode(name), keyPre = await nbKey(k1, NB_FW);
+    rxBuf = []; const reqPre = await nbSeal(keyPre, await nbFrame(BOARD_BLE, 0x5B, 0x00), NB_FW);
+    log('\n→ PRE_COMM : ' + toHex(reqPre)); await nbSend(id, reqPre, log);
+    let resp = await nbWait(() => rxBuf, 3000);
+    if (!resp) return log('\nPas de réponse à PRE_COMM. Relance l’essai.');
+    let { pt, ok } = await nbOpen(keyPre, Uint8Array.from(resp), NB_FW);
+    if (!ok) return log('\nPRE_COMM : somme de contrôle invalide. Relance l’essai.');
+    const authParam = pt.slice(7, 23), hasPwd = pt[6] !== 0;
+    log(`← PRE_COMM OK · mot de passe déjà enregistré : ${hasPwd ? 'oui' : 'non'}`);
+
+    // --- SET_PWD : enregistre un nouveau mot de passe de session (16 octets aléatoires) ---
+    const password = crypto.getRandomValues(new Uint8Array(16));
+    const keySet = await nbKey(new TextEncoder().encode(name), authParam);
+    const reqSet = await nbSealSN(keySet, await nbFrame(BOARD_BLE, 0x5C, 0x00, password), 2, authParam);
+    log('\n→ SET_PWD (compteur 2) : ' + toHex(reqSet));
+    log('Si la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
+    let accepted = false, pending = false;
+    for (let essai = 0; essai < 30 && !accepted; essai++) { // ré-émet toutes les 2 s (comme l'appli officielle), jusqu'à ~60 s
+      rxBuf = []; await nbSend(id, reqSet, log);
+      const resp = await nbWait(() => rxBuf, 2000);
+      if (!resp) { log('  (en attente…)'); continue; }
+      const r = await nbOpenSN(keySet, Uint8Array.from(resp), 2, authParam);
+      if (!r.ok) { log('  réponse non déchiffrable'); continue; }
+      if (r.pt[6]) { accepted = true; log('← SET_PWD : accepté ✓'); }
+      else if (!pending) { pending = true; log('← SET_PWD : en attente de ta confirmation sur la trottinette…'); }
+    }
+    if (!accepted) return log('\nSET_PWD non confirmé en 60 s. Relance l’essai.');
+
+    // --- AUTH : ouvre la session avec le nouveau mot de passe ---
+    const keyAuth = await nbKey(password, authParam);
+    rxBuf = []; const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(hexAscii(toHex(pt.slice(23, 37))))), 3, authParam);
+    log('\n→ AUTH (compteur 3) : ' + toHex(reqAuth)); await nbSend(id, reqAuth, log);
+    resp = await nbWait(() => rxBuf, 3000);
+    if (!resp) return log('\nPas de réponse à AUTH.');
+    const ra = await nbOpenSN(keyAuth, Uint8Array.from(resp), 3, authParam);
+    log(`← AUTH : ${ra.ok ? 'déchiffré' : 'non déchiffrable'}${ra.ok ? ', INDEX=' + ra.pt[6] : ''}`);
+    if (ra.ok && ra.pt[6]) {
+      log('\nSession ouverte ✓ Enregistrement de la clé pour les prochaines fois…');
+      store.set('scooter', { name, id, password: toHex(password), authParam: toHex(authParam), counter: 4 });
+      log('Trotti peut maintenant lire les informations de ta trottinette.');
+    } else log('\nAUTH refusé. Relance l’essai.');
   } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e))); }
   finally { if (id) { try { await BLE.disconnect({ deviceId: id }); log('Déconnecté.'); } catch {} } m.querySelector('#bleCopy').hidden = false; }
 }
