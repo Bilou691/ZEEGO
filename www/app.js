@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.0';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.1';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -538,7 +538,7 @@ async function nbKey(k1, k2) { // SHA-1(k1 ‖ k2)[0:16], k2 nul = 16 octets à 
   return new Uint8Array(await crypto.subtle.digest('SHA-1', c)).slice(0, 16);
 }
 async function nbSeal(key, pt) { // mode sans compteur : même flux pour chaque bloc, somme de contrôle en queue
-  const ks = await aesBlock(key, new Uint8Array(16)), out = new Uint8Array(pt.length + 6); out.set(pt.slice(0, 3)); let sum = 0;
+  const ks = key ? await aesBlock(key, new Uint8Array(16)) : new Uint8Array(16), out = new Uint8Array(pt.length + 6); out.set(pt.slice(0, 3)); let sum = 0;
   for (let i = 3; i < pt.length; i++) { sum += pt[i]; out[i] = pt[i] ^ ks[(i - 3) % 16]; }
   const cs = ~sum & 0xFFFF; out[pt.length + 2] = cs & 255; out[pt.length + 3] = cs >> 8; return out;
 }
@@ -548,44 +548,48 @@ async function nbOpen(key, ct) {
   return { pt, ok: (ct[n + 2] | ct[n + 3] << 8) === (~sum & 0xFFFF) };
 }
 async function bleLink() {
-  const m = openModal(`<h3>🔐 Liaison chiffrée</h3><div class="about" style="margin-top:-6px">Envoie la trame d’accueil PRE_COMM, la même que l’appli Segway à chaque connexion. Rien n’est modifié sur la trottinette.</div>
+  const m = openModal(`<h3>🔐 Liaison chiffrée</h3><div class="about" style="margin-top:-6px">Envoie la trame d’accueil PRE_COMM sous plusieurs variantes et écoute tous les canaux. Rien n’est modifié sur la trottinette.</div>
     <pre id="bleLog" class="blelog"></pre><button class="btn sec" id="bleCopy" style="margin:10px 0" hidden>Copier le rapport</button><button class="btn main" data-close>Fermer</button>`);
   const pre = m.querySelector('#bleLog'), lines = [`Trotti v${V} · liaison · ${new Date().toLocaleString('fr-FR')}`];
   const log = t => { lines.push(t); pre.textContent = lines.join('\n'); pre.scrollTop = pre.scrollHeight; };
   m.querySelector('#bleCopy').onclick = async e => { try { await navigator.clipboard.writeText(lines.join('\n')); e.target.textContent = 'Rapport copié ✓'; } catch { e.target.textContent = 'Copie impossible : fais une capture'; } };
   if (!BLE) return log('Bluetooth indisponible : installe la dernière version de l’APK Trotti.');
-  let id, rx = [];
+  const NUS = { svc: '6e400001-b5a3-f393-e0a9-e50e24dcca9e', tx: '6e400002-b5a3-f393-e0a9-e50e24dcca9e', rx: '6e400003-b5a3-f393-e0a9-e50e24dcca9e' };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let id, rx = [], seen = 0;
   try {
     await BLE.initialize({ androidNeverForLocation: true });
     log('Choisis ta trottinette…');
     const dev = await BLE.requestDevice({}); id = dev.deviceId; const name = dev.name || '';
     log(`Appareil : ${name}  [${id}]`);
     await BLE.connect({ deviceId: id, timeout: 15000 }); log('Connecté ✓');
+    try { log('MTU : ' + (await BLE.getMtu({ deviceId: id })).value); } catch {}
     await BLE.getServices({ deviceId: id });
-    BLE.addListener(`notification|${id}|${NB.svc}|${NB.rx}`, ev => { rx.push(...fromHex(ev.value)); });
-    await BLE.startNotifications({ deviceId: id, service: NB.svc, characteristic: NB.rx }); log('Écoute du canal 0004 ✓');
-    const plain = Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, 0x04, 0x5B, 0x00]), k1 = new TextEncoder().encode(name);
-    let got = false;
-    for (const [label, k2] of [['clé 2 = zéros', null], ['clé 2 = fw_data', NB_FW]]) {
-      const key = await nbKey(k1, k2), tx = await nbSeal(key, plain);
-      for (let essai = 1; essai <= 2 && !got; essai++) {
-        rx = []; log(`\n→ PRE_COMM (${label}, essai ${essai}) : ${toHex(tx)}`);
-        for (let o = 0; o < tx.length; o += 20) { await BLE.write({ deviceId: id, service: NB.svc, characteristic: NB.tx, value: toHex(tx.slice(o, o + 20)), timeout: 5000 }); await new Promise(r => setTimeout(r, 10)); }
-        const t0 = Date.now(); while (Date.now() - t0 < 2500 && !(rx.length >= 3 && rx.length >= rx[2] + 13)) await new Promise(r => setTimeout(r, 50));
-        if (!rx.length) { log('  (aucune réponse)'); continue; }
-        log(`← ${rx.length} octets : ${toHex(rx)}`);
-        if (toHex(rx) === toHex(tx)) { log('  écho de la requête : ignoré'); continue; }
-        if (rx.length < 13 || rx[0] !== 0x5A) { log('  trame inattendue'); continue; }
-        const { pt, ok } = await nbOpen(key, Uint8Array.from(rx));
-        log(`  déchiffrement : ${ok ? 'somme de contrôle OK ✓' : 'somme de contrôle fausse ✗'}\n  clair : ${toHex(pt)}`);
-        if (ok && pt.length >= 34) {
-          log(`  INDEX = ${pt[6]} → ${pt[6] ? 'un mot de passe est déjà enregistré' : 'aucun mot de passe enregistré'}\n  paramètre d’authentification : ${toHex(pt.slice(7, 23))}\n  numéro de série : « ${hexAscii(toHex(pt.slice(23, 37)))} »`);
-          got = true;
-        }
-      }
-      if (got) break;
+    const subs = [[NB.svc, NB.rx, 'NB-0004'], [NB.svc, '6e400006-0000-0000-006e-696e65626f74', 'NB-0006'], [NUS.svc, NUS.rx, 'NUS-0003']];
+    for (const [sv, ch, tag] of subs) {
+      BLE.addListener(`notification|${id}|${sv}|${ch}`, ev => { seen++; rx.push(...fromHex(ev.value)); log(`   ‹${tag}› ${ev.value}`); });
+      try { await BLE.startNotifications({ deviceId: id, service: sv, characteristic: ch }); log(`Écoute ${tag} ✓`); } catch (e) { log(`Écoute ${tag} refusée`); }
     }
-    log(got ? '\nLiaison chiffrée validée ✓ (aucune écriture d’état).' : '\nPas de réponse exploitable : envoie-moi ce rapport.');
+    await sleep(600);
+    const k1 = new TextEncoder().encode(name);
+    const variants = [['clé 2 = zéros', await nbKey(k1, null)], ['clé 2 = fw_data', await nbKey(k1, NB_FW)], ['sans chiffrement', null]];
+    let got = false;
+    outer: for (const ch of [[NB.svc, NB.tx, 'NB-0002'], [NUS.svc, NUS.tx, 'NUS-0002']]) for (const sync of [0xA5, 0xB5]) for (const [label, key] of variants) {
+      const plain = Uint8Array.from([0x5A, sync, 0x00, 0x3E, 0x04, 0x5B, 0x00]), tx = await nbSeal(key, plain);
+      rx = []; log(`\n→ ${ch[2]} sync ${sync.toString(16)} ${label} : ${toHex(tx)}`);
+      try { await BLE.write({ deviceId: id, service: ch[0], characteristic: ch[1], value: toHex(tx), timeout: 5000 }); } catch (e) { log('  écriture refusée : ' + (e.message || e.errorMessage || e)); continue; }
+      const t0 = Date.now(); while (Date.now() - t0 < 1800 && !(rx.length >= 3 && rx.length >= rx[2] + 13)) await sleep(50);
+      if (!rx.length) continue;
+      log(`← ${rx.length} octets`);
+      if (toHex(rx) === toHex(tx)) { log('  écho de la requête'); continue; }
+      if (rx.length >= 13 && key) {
+        const { pt, ok } = await nbOpen(key, Uint8Array.from(rx));
+        log(`  déchiffrement : ${ok ? 'OK ✓' : 'somme de contrôle fausse ✗'}  clair : ${toHex(pt)}`);
+        if (ok && pt.length >= 37) { log(`  INDEX = ${pt[6]} → ${pt[6] ? 'mot de passe déjà enregistré' : 'aucun mot de passe enregistré'}\n  auth : ${toHex(pt.slice(7, 23))}\n  série : « ${hexAscii(toHex(pt.slice(23, 37)))} »`); got = true; break outer; }
+      }
+    }
+    log(`\nNotifications reçues au total : ${seen}`);
+    log(got ? 'Liaison chiffrée validée ✓ (aucune écriture d’état).' : 'Pas de réponse exploitable : envoie-moi ce rapport.');
   } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e))); }
   finally { if (id) { try { await BLE.disconnect({ deviceId: id }); log('Déconnecté.'); } catch {} } m.querySelector('#bleCopy').hidden = false; }
 }
