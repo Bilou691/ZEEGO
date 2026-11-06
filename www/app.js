@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.3';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.4';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -527,6 +527,7 @@ async function bleDiag() {
 // PRE_COMM est la trame que toute appli envoie à chaque connexion : elle ne change aucun état.
 // SET_PWD / AUTH (qui écrivent un mot de passe) ne sont volontairement PAS implémentés ici.
 const NB = { svc: '6e400001-0000-0000-006e-696e65626f74', tx: '6e400002-0000-0000-006e-696e65626f74', rx: '6e400004-0000-0000-006e-696e65626f74' };
+const NUS = { svc: '6e400001-b5a3-f393-e0a9-e50e24dcca9e', tx: '6e400002-b5a3-f393-e0a9-e50e24dcca9e', rx: '6e400003-b5a3-f393-e0a9-e50e24dcca9e' };
 const NB_FW = Uint8Array.from([0x97, 0xCF, 0xB8, 0x02, 0x84, 0x41, 0x43, 0xDE, 0x56, 0x00, 0x2B, 0x3B, 0x34, 0x78, 0x0A, 0x5D]);
 const toHex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
 const fromHex = h => Uint8Array.from(h.match(/../g) || [], x => parseInt(x, 16));
@@ -556,7 +557,6 @@ async function bleLink() {
   const log = t => { lines.push(t); pre.textContent = lines.join('\n'); pre.scrollTop = pre.scrollHeight; };
   m.querySelector('#bleCopy').onclick = async e => { try { await navigator.clipboard.writeText(lines.join('\n')); e.target.textContent = 'Rapport copié ✓'; } catch { e.target.textContent = 'Copie impossible : fais une capture'; } };
   if (!BLE) return log('Bluetooth indisponible : installe la dernière version de l’APK Trotti.');
-  const NUS = { svc: '6e400001-b5a3-f393-e0a9-e50e24dcca9e', tx: '6e400002-b5a3-f393-e0a9-e50e24dcca9e', rx: '6e400003-b5a3-f393-e0a9-e50e24dcca9e' };
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   let id, rx = [], seen = 0;
   try {
@@ -658,8 +658,8 @@ async function nbFrame(target, cmd, index, data) {
   f[0] = 0x5A; f[1] = 0xA5; f[2] = d.length; f[3] = 0x3E; f[4] = target; f[5] = cmd; f[6] = index; f.set(d, 7);
   return f;
 }
-async function nbSend(id, tx, log) {
-  for (let o = 0; o < tx.length; o += 20) { await BLE.write({ deviceId: id, service: NB.svc, characteristic: NB.tx, value: toHex(tx.slice(o, o + 20)), timeout: 5000 }); await new Promise(r => setTimeout(r, 12)); }
+async function nbSend(id, tx, log, svc) {
+  for (let o = 0; o < tx.length; o += 20) { await BLE.write({ deviceId: id, service: svc.svc, characteristic: svc.tx, value: toHex(tx.slice(o, o + 20)), timeout: 5000 }); await new Promise(r => setTimeout(r, 12)); }
 }
 async function nbWait(getBuf, ms) { // attend une trame complète (sync + LENGTH + queue 13 octets)
   const t0 = Date.now();
@@ -682,13 +682,14 @@ async function blePair() {
     log(`Appareil : ${name}  [${id}]`);
     await BLE.connect({ deviceId: id, timeout: 15000 }); log('Connecté ✓');
     await BLE.getServices({ deviceId: id });
-    BLE.addListener(`notification|${id}|${NB.svc}|${NB.rx}`, ev => rxBuf.push(...fromHex(ev.value)));
-    await BLE.startNotifications({ deviceId: id, service: NB.svc, characteristic: NB.rx });
+    // Canal qui a répondu lors du dernier test de liaison (service standard « Nordic UART »).
+    BLE.addListener(`notification|${id}|${NUS.svc}|${NUS.rx}`, ev => rxBuf.push(...fromHex(ev.value)));
+    await BLE.startNotifications({ deviceId: id, service: NUS.svc, characteristic: NUS.rx });
 
     // --- PRE_COMM (variante validée sur cette trottinette le 2026-11-06) ---
     const k1 = new TextEncoder().encode(name), keyPre = await nbKey(k1, NB_FW);
     rxBuf = []; const reqPre = await nbSeal(keyPre, await nbFrame(BOARD_BLE, 0x5B, 0x00), NB_FW);
-    log('\n→ PRE_COMM : ' + toHex(reqPre)); await nbSend(id, reqPre, log);
+    log('\n→ PRE_COMM : ' + toHex(reqPre)); await nbSend(id, reqPre, log, NUS);
     let resp = await nbWait(() => rxBuf, 3000);
     if (!resp) return log('\nPas de réponse à PRE_COMM. Relance l’essai.');
     let { pt, ok } = await nbOpen(keyPre, Uint8Array.from(resp), NB_FW);
@@ -704,7 +705,7 @@ async function blePair() {
     log('Si la trottinette le demande, appuie brièvement sur son bouton d’allumage dès maintenant…');
     let accepted = false, pending = false;
     for (let essai = 0; essai < 30 && !accepted; essai++) { // ré-émet toutes les 2 s (comme l'appli officielle), jusqu'à ~60 s
-      rxBuf = []; await nbSend(id, reqSet, log);
+      rxBuf = []; await nbSend(id, reqSet, log, NUS);
       const resp = await nbWait(() => rxBuf, 2000);
       if (!resp) { log('  (en attente…)'); continue; }
       const r = await nbOpenSN(keySet, Uint8Array.from(resp), 2, authParam);
@@ -717,7 +718,7 @@ async function blePair() {
     // --- AUTH : ouvre la session avec le nouveau mot de passe ---
     const keyAuth = await nbKey(password, authParam);
     rxBuf = []; const reqAuth = await nbSealSN(keyAuth, await nbFrame(BOARD_BLE, 0x5D, 0x00, new TextEncoder().encode(hexAscii(toHex(pt.slice(23, 37))))), 3, authParam);
-    log('\n→ AUTH (compteur 3) : ' + toHex(reqAuth)); await nbSend(id, reqAuth, log);
+    log('\n→ AUTH (compteur 3) : ' + toHex(reqAuth)); await nbSend(id, reqAuth, log, NUS);
     resp = await nbWait(() => rxBuf, 3000);
     if (!resp) return log('\nPas de réponse à AUTH.');
     const ra = await nbOpenSN(keyAuth, Uint8Array.from(resp), 3, authParam);
