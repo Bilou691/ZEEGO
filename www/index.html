@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#10b981">
+<title>Trotti – GPS trottinette</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="map"></div>
+
+<div id="top">
+  <div class="searchbox">
+    <input id="q" type="search" placeholder="Où va-t-on en trottinette ?" autocomplete="off">
+    <button id="go" aria-label="Rechercher">➜</button>
+  </div>
+  <ul id="results" hidden></ul>
+</div>
+
+<div id="speedo" hidden><b id="spd">0</b><small>km/h</small></div>
+
+<div id="fabs">
+  <button id="locate" aria-label="Me localiser">◎</button>
+  <button id="report" aria-label="Signaler">⚠</button>
+</div>
+
+<div id="sheet" hidden>
+  <div id="routeInfo"></div>
+  <div class="row">
+    <label>Vitesse moy. <output id="avgOut">20</output> km/h
+      <input id="avg" type="range" min="12" max="25" value="20">
+    </label>
+  </div>
+  <div class="row">
+    <button id="start" class="primary">Démarrer</button>
+    <button id="cancel">Annuler</button>
+  </div>
+</div>
+
+<div id="menu" hidden>
+  <h3>Signaler</h3>
+  <div class="grid">
+    <button data-t="pothole">🕳️ Nid-de-poule</button>
+    <button data-t="works">🚧 Travaux</button>
+    <button data-t="police">👮 Contrôle</button>
+    <button data-t="danger">⚠️ Danger</button>
+    <button data-t="blocked">⛔ Piste bloquée</button>
+    <button data-t="cobble">🧱 Pavés</button>
+  </div>
+  <button id="closeMenu">Fermer</button>
+</div>
+
+<div id="toast" hidden></div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

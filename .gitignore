@@ -1,2 +1,9 @@
-reports.json
-node_modules
+node_modules/
+.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+android/.idea/
+server/reports.json
+*.log
