@@ -143,7 +143,7 @@ const ro = new ResizeObserver(updatePanel); ro.observe($('sheet')); ro.observe($
 // ---------- géolocalisation ----------
 function makeMe() {
   meEl = document.createElement('div'); meEl.className = 'me'; meEl.innerHTML = '<b></b><i></i>';
-  meMarker = new maplibregl.Marker({ element: meEl, rotationAlignment: 'map', pitchAlignment: 'map' }).setLngLat(me).addTo(map);
+  meMarker = new maplibregl.Marker({ element: meEl, rotationAlignment: 'map', pitchAlignment: 'viewport' }).setLngLat(me).addTo(map);
 }
 function angDiff(a, b) { return ((b - a + 540) % 360) - 180; }
 function onFix(pos) {
