@@ -157,3 +157,14 @@ body[data-s=ride] #toast{top:calc(var(--sa-t) + 104px)}
 @keyframes drop{from{transform:translateY(-24px);opacity:0}}
 .pin{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;background:var(--solid);
   border:3px solid var(--c,#f59e0b);box-shadow:0 4px 12px rgba(0,0,0,.35)}
+
+/* POI */
+.poi{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;background:var(--solid);border:2.5px solid var(--c);box-shadow:0 3px 10px rgba(0,0,0,.35)}
+.poi.tr{width:40px;height:40px;font-size:22px;border-width:3px;box-shadow:0 0 0 4px rgba(59,130,246,.25),0 3px 10px rgba(0,0,0,.35)}
+#layersBtn.on{color:var(--g2)}
+.poiInfo{margin:-4px 0 14px}.poiInfo div{margin:7px 0;font-size:15px;color:var(--mut);line-height:1.35}.poiInfo b{color:var(--fg)}
+.tog{display:flex;align-items:center;gap:12px;padding:13px 2px;border-bottom:1px solid var(--bd)}
+.tog .te{font-size:24px}.tog .tl{flex:1;font-size:15.5px;font-weight:600}
+.tog input{appearance:none;-webkit-appearance:none;width:52px;height:30px;border-radius:15px;background:var(--chip);position:relative;transition:background .2s;flex:none;border:1px solid var(--bd)}
+.tog input::after{content:'';position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.35);transition:transform .2s}
+.tog input:checked{background:var(--grad);border-color:transparent}.tog input:checked::after{transform:translateX(22px)}

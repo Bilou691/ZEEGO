@@ -34,6 +34,11 @@ cd android && ./gradlew assembleDebug      # → app/build/outputs/apk/debug/app
 ```
 Signer toujours avec la **même clé** (sinon Android refuse la mise à jour par-dessus l'ancienne installation).
 
+## Sur ma route (POI)
+
+Bouton « calques » : snacks/fast-food, restos/cafés/boulangeries, réparateurs trottinette-vélo-moto, affichés le long de l'itinéraire
+(couloir de 100 m) ou autour de soi sans itinéraire. Données OpenStreetMap via Overpass (plusieurs serveurs en secours).
+
 ## Itinéraire
 
 Moteur Valhalla (profil vélo) réglé trottinette : trajet le plus **rapide**, trafic ignoré (`use_roads` 0,85), pas de contrainte de pente,

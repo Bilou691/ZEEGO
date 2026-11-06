@@ -7,6 +7,7 @@ const CFG = {
   valhalla: 'https://valhalla1.openstreetmap.de/route',     // moteur d'itinéraire (profil vélo)
   osrm: 'https://routing.openstreetmap.de/routed-bike/route/v1/driving/', // secours
   photon: 'https://photon.komoot.io/api/',                  // recherche d'adresses (autocomplétion)
+  overpass: ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'], // POI OSM
   styleLight: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
   styleDark: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
   maxKmh: 25,                                               // limite légale EDPM en France
@@ -32,6 +33,7 @@ const I = {
   go: ic('<path d="M5 12h14M13 6l6 6-6 6"/>', 'style="stroke-width:2.6"'),
   locate: ic('<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.4" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>'),
   alert: ic('<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>'),
+  layers: ic('<path d="M12 3 3 8l9 5 9-5z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".5"/>'),
   stats: ic('<path d="M5 21V11M12 21V4M19 21v-7"/>', 'style="stroke-width:2.6"'),
   scooter: ic('<circle cx="5.5" cy="18" r="2.5"/><circle cx="18.5" cy="18" r="2.5"/><path d="M8 18h8M18.5 18 15.5 4.5H13M11 4.5h5"/>'),
   pin: ic('<path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>'),
@@ -52,12 +54,13 @@ $('app').innerHTML = `
 <div id="fabs">
   <button id="report" class="fab" aria-label="Signaler">${I.alert}</button>
   <button id="statsBtn" class="fab glass" aria-label="Mes kilomètres">${I.stats}</button>
+  <button id="layersBtn" class="fab glass" aria-label="Sur ma route">${I.layers}</button>
   <button id="locate" class="fab glass" aria-label="Me localiser">${I.locate}</button>
 </div>
 <button id="ridebtn">${I.scooter}Rouler</button>
 <div id="sheet" class="panel glass" hidden>
   <div id="routeInfo"></div>
-  <div class="chips" id="chips"></div>
+  <div class="chips" id="chips"></div><div class="chips" id="poiChips"></div>
   <div class="speedrow">Vitesse de croisière<input id="avg" type="range" min="12" max="25" step="1"><output id="avgOut"></output></div>
   <div class="btns"><button id="cancel" class="btn sec">Annuler</button><button id="start" class="btn main">${I.go}Démarrer</button></div>
 </div>
@@ -292,7 +295,7 @@ async function computeRoute(fit) {
   try {
     const r = await fetchRoute(me, dest, avgSpeed());
     if (my !== seq) return;
-    route = r; syncRoute(); if (fit) fitRoute(); showSheet(); setState('route');
+    route = r; syncRoute(); if (fit) fitRoute(); showSheet(); setState('route'); refreshPois();
   } catch { if (my === seq) toast('Itinéraire introuvable'); }
   finally { $('go').style.opacity = 1; }
 }
@@ -319,7 +322,7 @@ $('cancel').onclick = clearRoute;
 function clearRoute() {
   seq++; route = null; dest = null; syncRoute();
   if (destMarker) destMarker.remove(); destMarker = null; $('q').value = ''; $('clear').hidden = true;
-  setState('idle');
+  setState('idle'); refreshPois();
 }
 
 // ---------- trajet + compteur de kilomètres ----------
@@ -383,9 +386,9 @@ function hudTick() {
 }
 
 // ---------- guidage ----------
-function projectOnRoute(p) {
+function projectOnRoute(p, full) {
   const c = route.coords, n = c.length - 1, k = Math.cos(p[1] * Math.PI / 180), R = 111320;
-  const from = ride.off ? 0 : Math.max(0, ride.idx - 5), to = ride.off ? n : Math.min(n, ride.idx + 80);
+  const all = full || ride.off, from = all ? 0 : Math.max(0, ride.idx - 5), to = all ? n : Math.min(n, ride.idx + 80);
   let best = { d: Infinity, i: ride.idx, t: 0 };
   for (let i = from; i < to; i++) {
     const ax = (c[i][0] - p[0]) * k * R, ay = (c[i][1] - p[1]) * R, bx = (c[i + 1][0] - p[0]) * k * R, by = (c[i + 1][1] - p[1]) * R;
@@ -420,7 +423,7 @@ async function reroute() {
   try {
     const r = await fetchRoute(me, dest, avgSpeed());
     if (!ride.active) return;
-    route = r; ride.idx = 0; ride.off = 0; syncRoute(); navUpdate();
+    route = r; ride.idx = 0; ride.off = 0; syncRoute(); navUpdate(); refreshPois();
   } catch { toast('Recalcul impossible'); }
 }
 
@@ -510,8 +513,110 @@ $('report').onclick = () => {
     toast(s === 'limit' ? 'Trop de signalements, réessaie plus tard' : 'Merci ! ' + REPORT_TYPES[t][1] + (s === 'shared' ? ' partagé' : ' (enregistré hors ligne)'));
   });
 };
+
+// ---------- POI sur la route : snacks, restos, réparateurs (OpenStreetMap / Overpass) ----------
+const POI_CATS = {
+  snack: { emoji: '🍔', label: 'Snacks & fast-food', color: '#f97316' },
+  resto: { emoji: '🍽️', label: 'Restos, cafés & boulangeries', color: '#ef4444' },
+  garage: { emoji: '🔧', label: 'Réparateurs trottinette, vélo & moto', color: '#3b82f6' }
+};
+const TROTTI_RE = /trott|scoot|edpm|ninebot|segway|dualtron|xiaomi|speedway|kaabo|vsett|mobilit[ée]/i;
+const poiPrefs = () => ({ snack: false, resto: false, garage: false, ...store.get('pois', {}) });
+const poiOn = () => Object.values(poiPrefs()).some(Boolean);
+let poiSeq = 0, poiKey = '', poiData = [];
+const poiMarkers = [];
+function poiQuery(area, pr) {
+  const q = [];
+  if (pr.snack) q.push('nwr["amenity"="fast_food"]["name"]');
+  if (pr.resto) q.push('nwr["amenity"~"^(restaurant|cafe)$"]["name"]', 'nwr["shop"="bakery"]["name"]');
+  if (pr.garage) q.push('nwr["shop"~"^(bicycle|motorcycle|scooter|moped)$"]["name"]', 'nwr["service:bicycle:repair"="yes"]["name"]');
+  return `[out:json][timeout:25];(${q.map(x => x + area + ';').join('')});out center tags 250;`;
+}
+async function overpass(q) {
+  let err;
+  for (const u of CFG.overpass) {
+    try {
+      const r = await fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(22000) });
+      if (!r.ok) throw new Error('overpass ' + r.status);
+      return (await r.json()).elements || [];
+    } catch (e) { err = e; }
+  }
+  throw err;
+}
+function corridor() { // points de l'itinéraire tous les ~150 m, rayon 100 m
+  const pts = []; let next = 0;
+  route.coords.forEach((c, i) => { if (route.cum[i] >= next || i === route.coords.length - 1) { pts.push(c[1].toFixed(5), c[0].toFixed(5)); next = route.cum[i] + 150; } });
+  return `(around:100,${pts.join(',')})`;
+}
+function poiOf(e) {
+  const t = e.tags || {}, lat = e.lat ?? e.center?.lat, lng = e.lon ?? e.center?.lon;
+  if (lat == null || !t.name) return null;
+  const cat = t.amenity === 'fast_food' ? 'snack' : (t.amenity === 'restaurant' || t.amenity === 'cafe' || t.shop === 'bakery') ? 'resto' : 'garage';
+  const trotti = cat === 'garage' && (TROTTI_RE.test(t.name) || TROTTI_RE.test(t.brand || '') || t.shop === 'scooter');
+  const emoji = trotti ? '🛴' : t.amenity === 'cafe' ? '☕' : t.shop === 'bakery' ? '🥐' : POI_CATS[cat].emoji;
+  return { id: e.type + e.id, cat, emoji, trotti, name: t.name, lat, lng, tags: t };
+}
+function clearPois() { poiMarkers.forEach(m => m.remove()); poiMarkers.length = 0; poiData = []; poiKey = ''; renderPoiChips(); }
+async function refreshPois() {
+  const pr = poiPrefs(), my = ++poiSeq;
+  $('layersBtn').classList.toggle('on', poiOn());
+  if (!poiOn()) return clearPois();
+  let area, key = JSON.stringify(pr);
+  if (route) { area = corridor(); key += 'r' + route.coords.length + Math.round(route.distance); }
+  else {
+    if (map.getZoom() < 13.5) return clearPois();
+    const b = map.getBounds(), c = map.getCenter(), w = (b.getEast() - b.getWest()) * .1, h = (b.getNorth() - b.getSouth()) * .1;
+    area = `(${(b.getSouth() - h).toFixed(4)},${(b.getWest() - w).toFixed(4)},${(b.getNorth() + h).toFixed(4)},${(b.getEast() + w).toFixed(4)})`;
+    key += 'v' + c.lat.toFixed(2) + c.lng.toFixed(2) + Math.round(map.getZoom());
+  }
+  if (key === poiKey) return;
+  try {
+    const els = await overpass(poiQuery(area, pr));
+    if (my !== poiSeq) return;
+    let list = els.map(poiOf).filter(Boolean);
+    if (route) {
+      list.forEach(p => { const a = projectOnRoute([p.lng, p.lat], true); p.along = a.along; p.off = a.d; });
+      list = list.filter(p => p.off <= 120).sort((a, b) => a.along - b.along);
+    } else { const c = me || [map.getCenter().lng, map.getCenter().lat]; list.sort((a, b) => dist(c, [a.lng, a.lat]) - dist(c, [b.lng, b.lat])); }
+    poiData = list.slice(0, 150); poiKey = key; renderPois();
+  } catch (e) { if (my === poiSeq) toast('Commerces indisponibles pour l’instant'); }
+}
+function renderPois() {
+  poiMarkers.forEach(m => m.remove()); poiMarkers.length = 0;
+  poiData.forEach(p => {
+    const el = document.createElement('div'); el.className = 'poi' + (p.trotti ? ' tr' : ''); el.style.setProperty('--c', POI_CATS[p.cat].color); el.textContent = p.emoji;
+    el.onclick = e => { e.stopPropagation(); showPoi(p); };
+    poiMarkers.push(new maplibregl.Marker({ element: el }).setLngLat([p.lng, p.lat]).addTo(map));
+  });
+  renderPoiChips();
+}
+function renderPoiChips() {
+  const box = $('poiChips'); if (!box) return;
+  const n = c => poiData.filter(p => p.cat === c).length, tr = poiData.filter(p => p.trotti).length;
+  box.innerHTML = route ? Object.entries(POI_CATS).filter(([k]) => poiPrefs()[k]).map(([k, v]) => `<span class="chip">${v.emoji} ${n(k)} ${{ snack: 'snack', resto: 'resto/café', garage: 'réparateur' }[k]}${n(k) > 1 && k !== 'resto' ? 's' : ''}</span>`).join('') +
+    (tr ? `<span class="chip ok">🛴 ${tr} spécialiste${tr > 1 ? 's' : ''} trottinette</span>` : '') : '';
+}
+function showPoi(p) {
+  const t = p.tags, addr = [[t['addr:housenumber'], t['addr:street']].filter(Boolean).join(' '), t['addr:city']].filter(Boolean).join(', ');
+  const row = (k, v) => v ? `<div><b>${k}</b> ${esc(v)}</div>` : '';
+  const m = openModal(`<h3>${p.emoji} ${esc(p.name)}</h3><div class="poiInfo">
+    ${row('', POI_CATS[p.cat].label)}${p.trotti ? '<div><b>🛴 Spécialiste trottinette / mobilité électrique</b></div>' : ''}
+    ${row('Cuisine :', (t.cuisine || '').replace(/[;_]/g, ', '))}${row('Adresse :', addr)}${row('Horaires :', t.opening_hours)}${row('Tél :', t.phone || t['contact:phone'])}
+    ${p.along != null ? `<div><b>Sur ton trajet :</b> à ${fmtDist(p.along)} du départ, détour ${Math.round(p.off)} m</div>` : ''}</div>
+    <div class="btns"><button class="btn sec" data-close>Fermer</button><button class="btn main" id="poiGo">${I.go}Y aller</button></div>`);
+  m.querySelector('#poiGo').onclick = () => { m.hidden = true; m.innerHTML = ''; $('q').value = p.name; $('clear').hidden = false; setDest([p.lng, p.lat], p.name); };
+}
+$('layersBtn').onclick = () => {
+  const pr = poiPrefs();
+  const m = openModal(`<h3>Sur ma route</h3><div class="about" style="margin-top:-6px">Affiche des adresses utiles le long de ton itinéraire (ou autour de toi quand il n’y en a pas).</div>
+    ${Object.entries(POI_CATS).map(([k, v]) => `<label class="tog"><span class="te">${v.emoji}</span><span class="tl">${v.label}</span><input type="checkbox" data-k="${k}" ${pr[k] ? 'checked' : ''}></label>`).join('')}
+    <div class="about">Données OpenStreetMap : les commerces ajoutés récemment peuvent manquer. Les 🛴 sont les boutiques dont le nom évoque la trottinette.</div>
+    <button class="btn main" data-close>OK</button>`);
+  m.querySelectorAll('[data-k]').forEach(i => i.onchange = () => { const p = poiPrefs(); p[i.dataset.k] = i.checked; store.set('pois', p); refreshPois(); });
+};
+let pt; map.on('moveend', () => { clearTimeout(pt); pt = setTimeout(() => { if (!route) refreshPois(); }, 900); });
 let rt; map.on('moveend', () => { clearTimeout(rt); rt = setTimeout(fetchReports, 600); });
-map.on('load', () => { renderReports(); fetchReports(); document.body.classList.add('ready'); });
+map.on('load', () => { renderReports(); fetchReports(); refreshPois(); document.body.classList.add('ready'); });
 setTimeout(() => document.body.classList.add('ready'), 3500);
 setInterval(fetchReports, 30000);
 
