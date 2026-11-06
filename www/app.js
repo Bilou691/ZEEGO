@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.3.0';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.3.1';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -477,7 +477,8 @@ $('statsBtn').onclick = () => {
 // ---------- Bluetooth : ma trottinette (étape 1 : diagnostic, lecture seule) ----------
 // Rien n'est écrit sur la trottinette : on liste ce qu'elle expose, on lit les infos
 // standard (nom, fabricant, modèle, firmware) et on écoute ce qu'elle émet 10 secondes.
-const BLE = window.Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('BluetoothLe') ? Capacitor.registerPlugin('BluetoothLe') : null;
+const BLE = window.Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform() && Capacitor.nativePromise // pont natif Capacitor (sans la bibliothèque complète)
+  ? new Proxy({}, { get: (_, m) => m === 'addListener' ? (ev, cb) => Capacitor.addListener('BluetoothLe', ev, cb) : o => Capacitor.nativePromise('BluetoothLe', m, o || {}) }) : null;
 const hexAscii = h => (h.match(/../g) || []).map(b => parseInt(b, 16)).map(c => c >= 32 && c < 127 ? String.fromCharCode(c) : '·').join('');
 const flags = p => Object.entries(p || {}).filter(([, v]) => v).map(([k]) => k).join(',');
 async function bleDiag() {

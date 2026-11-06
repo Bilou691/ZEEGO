@@ -5,7 +5,7 @@
 // Si le code reçu plante au démarrage, on revient automatiquement à la version embarquée.
 (() => {
   const SHELL_REV = 2;          // révision du « socle » (APK) : à incrémenter si boot.js / index.html / Android changent
-  const BUNDLED_V = '1.3.0';    // version de app.js + style.css embarqués dans l'APK
+  const BUNDLED_V = '1.3.1';    // version de app.js + style.css embarqués dans l'APK
   const BASE = 'https://raw.githubusercontent.com/Bilou691/ZEEGO/main/www/';
   const KEY = 'trotti.bundle', TRIED = 'trotti.badbundle';
 
@@ -34,6 +34,14 @@
     setTimeout(bad, 10000);
     const ok = setInterval(() => { if (window.__ok) { sessionStorage.removeItem(TRIED); clearInterval(ok); } }, 300);
   } else run();
+
+  // Si l'app ne démarre pas, on affiche l'erreur sur l'écran de démarrage (au lieu d'un écran figé).
+  let lastErr = '';
+  window.addEventListener('error', e => { lastErr = (e.message || '') + ' @' + String(e.filename || '').split('/').pop() + ':' + e.lineno; });
+  setTimeout(() => {
+    const sp = document.getElementById('splash');
+    if (!window.__ok && sp) sp.insertAdjacentHTML('beforeend', '<small style="color:#f87171;max-width:86%;text-align:center;font:12px monospace;margin-top:8px"></small>'), sp.lastChild.textContent = 'Erreur de démarrage v' + boot.version + ' : ' + (lastErr || 'inconnue');
+  }, 6000);
 
   async function check() {
     if (!navigator.onLine) return 'offline';
