@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.10';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.11';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -549,6 +549,7 @@ class NbCrypto {
     this.challenge = new Uint8Array(14); // série de la trottinette, à renvoyer (0x5D)
     this.key = new Uint8Array(16); this.counter = 0;
     this.L = false; this.M = false; this.O = false; // étapes 1/2/3 franchies
+    this.pwdStored = 0; // INDEX de la réponse 0x5B : secret de session déjà enregistré sur la trottinette
     this.ready = this.deriveKey(this.name, NB_FW); // la dérivation est asynchrone : on l'attend avant toute crypto
   }
   async deriveKey(k1, k2) { this.key = await nbKey(k1, k2); }
@@ -610,7 +611,7 @@ class NbCrypto {
     out.set(eff === 0 ? await this.fXor(body) : await this.ctrBody(body, eff), 3);
     if (eff === 0 && out.length >= 37 && out[2] === 0x1E && out[4] === 0x3E && out[5] === 0x5B) { // étape 1 : jeton + challenge
       this.token.set(out.slice(7, 23)); this.challenge.set(out.slice(23, 37));
-      await this.deriveKey(this.name, this.token); this.L = true;
+      await this.deriveKey(this.name, this.token); this.L = true; this.pwdStored = out[6];
     }
     if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5C && (out[6] === 0 || out[6] === 1)) { // étape 2 : ACK (le firmware ZT3 répond arg=0x00)
       await this.deriveKey(this.random, this.token); this.M = true;
@@ -635,11 +636,13 @@ async function nbParse(c, wire) { // déchiffre une trame fil et la découpe (nu
 
 // ---------- Transport BLE : connexion + file de trames ----------
 async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour l'écran d'association
-  await BLE.connect({ deviceId: id, timeout: 15000 });
+  await BLE.connect({ deviceId: id, timeout: 15000 }); // le plugin y négocie déjà un MTU de 512 (max accepté par la trottinette)
   let chunk = 20;
   try { chunk = Math.max(20, (await BLE.getMtu({ deviceId: id })).value - 3); } catch {}
+  log && log(`MTU négocié : ${chunk + 3} — trames jusqu'à ${chunk} octets d'un seul morceau` + (chunk < 29 ? ' ⚠ l’association (29 octets) sera fragmentée, risque d’échec' : ''));
   await BLE.getServices({ deviceId: id }); // certains Android en ont besoin avant startNotifications
-  const t = { id, chunk, q: [], buf: [], lastTx: '' };
+  const t = { id, chunk, q: [], buf: [], lastTx: '', lost: false };
+  t.hDisc = await BLE.addListener(`disconnected|${id}`, () => { t.lost = true; log && log('⚠ la trottinette a coupé la liaison'); });
   t.handle = await BLE.addListener(`notification|${id}|${NUS.svc}|${NUS.rx}`, ev => {
     t.buf.push(...fromHex(ev.value));
     for (;;) { // extraction des trames complètes : [5A A5 len] corps queue-de-13
@@ -653,11 +656,13 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
     }
   });
   await BLE.startNotifications({ deviceId: id, service: NUS.svc, characteristic: NUS.rx });
+  await sleep(200); // laisser l'abonnement notifications bien prendre avant l'étape 1 (cf. référence)
   t.send = async wire => {
-    t.lastTx = toHex(wire); log && log('→ ' + toHex(wire));
+    t.lastTx = toHex(wire);
+    if (wire.length > t.chunk) log && log(`⚠ trame de ${wire.length} octets : fragmentée en ${Math.ceil(wire.length / t.chunk)} écritures`);
+    log && log('→ ' + toHex(wire));
     for (let o = 0; o < wire.length; o += t.chunk) {
       await BLE.write({ deviceId: id, service: NUS.svc, characteristic: NUS.tx, value: toHex(wire.slice(o, o + t.chunk)), timeout: 5000 });
-      if (o + t.chunk < wire.length) await sleep(12);
     }
   };
   t.recv = async ms => { // prochaine trame reçue, ou null après ms
@@ -665,7 +670,7 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
     while (Date.now() - t0 < ms) { if (t.q.length) { const f = t.q.shift(); log && log('← ' + toHex(f)); return f; } await sleep(15); }
     return null;
   };
-  t.close = async () => { try { await t.handle.remove(); } catch {} try { await BLE.disconnect({ deviceId: id }); } catch {} };
+  t.close = async () => { try { await t.hDisc.remove(); } catch {} try { await t.handle.remove(); } catch {} try { await BLE.disconnect({ deviceId: id }); } catch {} };
   return t;
 }
 
@@ -681,18 +686,25 @@ async function nbHandshake(t, c, resume, log, onButton) {
     if (!c.L) await sleep(300);
   }
   if (!c.L) throw new Error('étape 1 : pas de réponse (trottinette allumée ? appli Segway fermée ?)');
-  log(`étape 1 ✓ jeton reçu · série « ${hexAscii(toHex(c.challenge))} »`);
+  log(`étape 1 ✓ jeton reçu · série « ${hexAscii(toHex(c.challenge))} »${c.pwdStored ? ' · un secret est déjà enregistré (INDEX=' + c.pwdStored + '), le nouveau le remplacera' : ''}`);
   if (resume) { // étape 2 en reprise : on réinjecte le secret déjà enregistré, rien à envoyer
     await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
   } else {
     log('étape 2 : enregistrement du secret…');
     onButton && onButton();
     await t.send(await c.encrypt(c.buildPairInit(0x04))); // envoyé EXACTEMENT une fois (insister coupe la liaison)
-    for (let i = 0; i < 400 && !c.M; i++) { const f = await t.recv(50); if (f) await nbParse(c, f); } // jusqu'à 20 s
+    for (let i = 0; i < 400 && !c.M; i++) { // jusqu'à 20 s
+      if (t.lost) throw new Error('la liaison a été coupée pendant l’étape 2 (appui long = extinction ?)');
+      const f = await t.recv(50); if (f) await nbParse(c, f);
+    }
+    if (!c.M) { // SHU n'attend pas l'ACK : il enchaîne, la trottinette retient les 1res trames valides
+      await c.setRandomAppData(c.random); c.M = true; // bascule forcée sur la clé de session, l'étape 3 tranchera
+      log('pas d’ACK reçu — bascule sur la clé de session (comme SHU) et on tente la suite…');
+    }
   }
   if (!c.M) throw new Error('étape 2 : pas de confirmation (appui sur le bouton d’allumage requis ?)');
   log('étape 2 ✓ session établie');
-  for (let a = 0; a < 4 && !c.O; a++) { // étape 3 : renvoi de la série (échec toléré, l'étape 2 suffit pour lire)
+  for (let a = 0; a < 4 && !c.O && !t.lost; a++) { // étape 3 : renvoi de la série (échec toléré, l'étape 2 suffit pour lire)
     await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge));
     for (let i = 0; i < 15 && !c.O; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
     if (!c.O) await sleep(300);
@@ -861,22 +873,36 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
-    t = await nbConnect(id, h => log(h));
-    const c = new NbCrypto(name);
-    await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ APPUIE UNE FOIS sur le bouton d’allumage de la trottinette, maintenant…\n'));
-    store.set('scooter', { name, id, random: toHex(c.random) });
-    log('\nSession ouverte ✓ Trotti est associée à ta trottinette.');
-    for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) { // lectures de confirmation
-      const p = await nbReadReg(t, c, r.d, r.r, r.n);
-      log(p ? `${r.lab} : ${r.dec(p)}  [${(toHex(p).match(/../g) || []).join(' ')}]` : `${r.lab} : pas de réponse`);
+    let ok = false;
+    for (let essai = 1; essai <= 3 && !ok; essai++) { // jusqu'à 3 connexions fraîches (la recovery documentée)
+      if (essai > 1) { log(`\n— nouvelle tentative ${essai}/3 sur une connexion fraîche —`); await sleep(1200); }
+      t = await nbConnect(id, h => log(h));
+      const c = new NbCrypto(name);
+      try {
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ MAINTIENS enfoncé (~2 s) le bouton d’allumage de la trottinette, maintenant — sans l’éteindre…\n'));
+        let lu = 0; // lectures de confirmation : elles seules prouvent que le secret est accepté
+        for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
+          const p = await nbReadReg(t, c, r.d, r.r, r.n);
+          if (p) { lu++; log(`${r.lab} : ${r.dec(p)}  [${(toHex(p).match(/../g) || []).join(' ')}]`); }
+          else log(`${r.lab} : pas de réponse`);
+        }
+        if (!lu) throw new Error('session chiffrée ouverte mais la trottinette ne répond à aucune lecture');
+        store.set('scooter', { name, id, random: toHex(c.random) });
+        log('\nSession confirmée ✓ Trotti est associée à ta trottinette.');
+        await sc.stop(); // la session passe au moteur : elle reste ouverte pour les relevés
+        sc.t = t; sc.c = c; sc.state = 'live'; sc.data = sc.data || {}; sc.startLoop(); sc.poll(); sc.render();
+        t = null; // transférée au moteur (ne pas fermer)
+        ok = true;
+        log('\nC’est prêt : les infos s’affichent dans « Mes kilomètres » et pendant tes trajets 🛴');
+      } catch (e) {
+        const msg = e && (e.message || e.errorMessage) || String(e);
+        log('\nÉchec : ' + msg);
+        if (t) { try { await t.close(); } catch {} t = null; }
+        if (essai === 3) log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
+      }
     }
-    await sc.stop(); // la session passe au moteur : elle reste ouverte pour les relevés
-    sc.t = t; sc.c = c; sc.state = 'live'; sc.data = sc.data || {}; sc.startLoop(); sc.poll(); sc.render();
-    t = null;
-    log('\nC’est prêt : les infos s’affichent dans « Mes kilomètres » et pendant tes trajets 🛴');
   } catch (e) {
-    log('\nÉchec : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e)));
-    log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
+    log('\nErreur : ' + (e && (e.message || e.errorMessage) || JSON.stringify(e)));
   } finally {
     if (t) { try { await t.close(); } catch {} }
     m.querySelector('#bleCopy').hidden = false;
