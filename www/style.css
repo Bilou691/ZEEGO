@@ -170,3 +170,26 @@ body[data-s=ride] #toast{top:calc(var(--sa-t) + 104px)}
 .tog input:checked{background:var(--grad);border-color:transparent}.tog input:checked::after{transform:translateX(22px)}
 
 .blelog{background:var(--chip);border-radius:16px;padding:12px;margin:10px 0 0;font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace;max-height:46vh;overflow:auto;white-space:pre-wrap;word-break:break-all;user-select:text;color:var(--fg)}
+
+/* trottinette connectée */
+.batcell{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;min-width:54px;opacity:.6}
+.batcell.live{opacity:1}
+.batcell span{display:flex;align-items:baseline;gap:2px}
+.batcell b{font-size:24px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+.batcell small{font-size:11px;color:var(--mut);font-weight:700}
+.batbar{width:38px;height:7px;border-radius:99px;background:var(--chip);overflow:hidden;border:1px solid var(--bd)}
+.batbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#34d399,#059669);border-radius:99px;transition:width .5s}
+.batcell.low .batbar i{background:linear-gradient(90deg,#f87171,#dc2626)}
+.batcell.low b{color:#f87171}
+.scpanel{margin:2px 0 4px}
+.schead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
+.schead b{font-size:15px}
+.schead span{font-size:11.5px;color:var(--mut);font-weight:600;white-space:nowrap}
+.scgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.scgrid div{background:var(--chip);border-radius:14px;padding:8px 10px;text-align:center;min-width:0}
+.scgrid b{display:block;font-size:14.5px;font-weight:800;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scgrid small{font-size:10px;color:var(--mut);font-weight:600;display:block;margin-top:1px}
+.scgrid code{font-size:8.5px;color:var(--mut);opacity:.75}
+.sclog{margin-top:10px}
+.sclog summary{font-size:12px;color:var(--mut);font-weight:600;cursor:pointer}
+.sclog pre{background:var(--chip);border-radius:14px;padding:10px;margin-top:8px;font:10.5px/1.5 ui-monospace,Menlo,Consolas,monospace;max-height:30vh;overflow:auto;white-space:pre-wrap;user-select:text}
