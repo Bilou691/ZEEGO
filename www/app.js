@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.12';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.13';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -692,11 +692,12 @@ async function nbHandshake(t, c, resume, log, onButton) {
   } else {
     log('étape 2 : enregistrement du secret…');
     onButton && onButton();
-    await sleep(5000); // LAISSER LE TEMPS DE MAINTENIR LE BOUTON : l'o1 doit partir pendant la fenêtre d'acceptation
+    await sleep(5000); // laisser le temps de basculer le phare : l'o1 doit partir pendant la fenêtre d'acceptation
     await t.send(await c.encrypt(c.buildPairInit(0x04))); // envoyé EXACTEMENT une fois (insister coupe la liaison)
     let forced = false;
     for (let i = 0; i < 300 && !c.M; i++) { // jusqu'à 15 s
       if (t.lost) throw new Error('la liaison a été coupée pendant l’étape 2');
+      if (i === 160) log('(toujours rien — re-bascule le phare une fois si ce n’est pas fait)');
       const f = await t.recv(50); if (f) await nbParse(c, f);
     }
     if (!c.M) { // SHU n'attend pas l'ACK (fire-and-forget) : une lecture de test tranchera, sans marteler
@@ -883,7 +884,7 @@ async function blePair() {
       t = await nbConnect(id, h => log(h));
       const c = new NbCrypto(name);
       try {
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ DÈS MAINTENANT : maintiens enfoncé (~3 s) le bouton d’allumage — l’enregistrement part dans 5 s — sans éteindre la trottinette…\n'));
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ APPUIE UNE FOIS, BRIÈVEMENT, sur le bouton d’allumage : le PHARE doit S’ALLUMER ou S’ÉTEINDRE — c’est ce basculement qui confirme l’appairage (geste officiel SHU). Si rien ne bouge, re-appuie encore une fois. L’enregistrement part dans 5 s…\n'));
         let lu = 0; // lectures de confirmation : elles seules prouvent que le secret est accepté
         for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
           const p = await nbReadReg(t, c, r.d, r.r, r.n);
