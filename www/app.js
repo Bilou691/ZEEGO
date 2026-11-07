@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.11';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.12';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -692,24 +692,27 @@ async function nbHandshake(t, c, resume, log, onButton) {
   } else {
     log('étape 2 : enregistrement du secret…');
     onButton && onButton();
+    await sleep(5000); // LAISSER LE TEMPS DE MAINTENIR LE BOUTON : l'o1 doit partir pendant la fenêtre d'acceptation
     await t.send(await c.encrypt(c.buildPairInit(0x04))); // envoyé EXACTEMENT une fois (insister coupe la liaison)
-    for (let i = 0; i < 400 && !c.M; i++) { // jusqu'à 20 s
-      if (t.lost) throw new Error('la liaison a été coupée pendant l’étape 2 (appui long = extinction ?)');
+    let forced = false;
+    for (let i = 0; i < 300 && !c.M; i++) { // jusqu'à 15 s
+      if (t.lost) throw new Error('la liaison a été coupée pendant l’étape 2');
       const f = await t.recv(50); if (f) await nbParse(c, f);
     }
-    if (!c.M) { // SHU n'attend pas l'ACK : il enchaîne, la trottinette retient les 1res trames valides
-      await c.setRandomAppData(c.random); c.M = true; // bascule forcée sur la clé de session, l'étape 3 tranchera
-      log('pas d’ACK reçu — bascule sur la clé de session (comme SHU) et on tente la suite…');
+    if (!c.M) { // SHU n'attend pas l'ACK (fire-and-forget) : une lecture de test tranchera, sans marteler
+      await c.setRandomAppData(c.random); c.M = true; forced = true;
+      log('pas d’ACK — clé de session forcée, la lecture de test dira si ça marche (comme SHU)');
     }
+    if (!forced) {
+      log('étape 2 ✓ confirmée par la trottinette');
+      for (let a = 0; a < 4 && !c.O && !t.lost; a++) { // étape 3 : renvoi de la série (échec toléré, l'étape 2 suffit pour lire)
+        await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge));
+        for (let i = 0; i < 15 && !c.O; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
+        if (!c.O) await sleep(300);
+      }
+    } else log('étape 3 ignorée (session non confirmée) — lecture de test…');
   }
-  if (!c.M) throw new Error('étape 2 : pas de confirmation (appui sur le bouton d’allumage requis ?)');
-  log('étape 2 ✓ session établie');
-  for (let a = 0; a < 4 && !c.O && !t.lost; a++) { // étape 3 : renvoi de la série (échec toléré, l'étape 2 suffit pour lire)
-    await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge));
-    for (let i = 0; i < 15 && !c.O; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
-    if (!c.O) await sleep(300);
-  }
-  log(c.O ? 'étape 3 ✓ appariement complet' : 'étape 3 sans réponse — la lecture reste possible');
+  if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
 }
 
@@ -733,6 +736,7 @@ const ZT3_REGS = [
   { d: 0x07, r: 0x96, n: 4, k: 'tempBms', lab: 'Temp. batt.', dec: p => p[0] + ' °C' }
 ];
 async function nbReadReg(t, c, dst, reg, n) { // lecture cmd 0x01 → réponse cmd 0x04 (≈600 ms de patience)
+  if (t.lost) return null;
   await t.send(await nbWrap(c, dst, 0x01, reg, Uint8Array.from([n])));
   const t0 = Date.now();
   while (Date.now() - t0 < 600) {
@@ -879,7 +883,7 @@ async function blePair() {
       t = await nbConnect(id, h => log(h));
       const c = new NbCrypto(name);
       try {
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ MAINTIENS enfoncé (~2 s) le bouton d’allumage de la trottinette, maintenant — sans l’éteindre…\n'));
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ DÈS MAINTENANT : maintiens enfoncé (~3 s) le bouton d’allumage — l’enregistrement part dans 5 s — sans éteindre la trottinette…\n'));
         let lu = 0; // lectures de confirmation : elles seules prouvent que le secret est accepté
         for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
           const p = await nbReadReg(t, c, r.d, r.r, r.n);
@@ -898,7 +902,10 @@ async function blePair() {
         const msg = e && (e.message || e.errorMessage) || String(e);
         log('\nÉchec : ' + msg);
         if (t) { try { await t.close(); } catch {} t = null; }
-        if (essai === 3) log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
+        if (essai === 3) {
+          log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
+          log('Plan B si ça bloque encore : un ancien secret est peut-être resté sur la trottinette (INDEX=1) — une réinitialisation d’usine depuis l’appli Segway officielle l’efface, puis relance l’association.');
+        }
       }
     }
   } catch (e) {
