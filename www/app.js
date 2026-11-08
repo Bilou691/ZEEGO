@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.32';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.33';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -753,7 +753,35 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
   }
   if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare basculé en rythme pendant la fenêtre ? SHU/appli Segway fermées ?)');
   await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
-  await etape3(24); // SHU : D0 toutes les 500 ms jusqu’au 5D 01
+  // 0x5D : essais dans les 4 combinaisons format × clé (SN-session seul avait été testé, jamais avec un 5C 01 valide !)
+  const keyPreD = await nbKey(c.name, c.token); // clé courante nom‖jeton
+  const keyInitD = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
+  const keySessD = await nbKey(c.random, c.token); // clé de session secret‖jeton
+  const d05 = [
+    ['SN · session secret‖jeton', 'sn', keySessD],
+    ['SN · courante nom‖jeton', 'sn', keyPreD],
+    ['cpt0 · courante nom‖jeton', 'cpt0', keyPreD],
+    ['cpt0 · initiale nom‖sel', 'cpt0', keyInitD]
+  ];
+  for (const [lab, fmt, cle] of d05) {
+    if (c.O) break;
+    log('étape 3 · essai 0x5D ' + lab + '…');
+    const cc = fmt === 'sn' ? Object.assign(Object.create(c), { key: cle }) : c;
+    for (let a = 0; a < 2 && !c.O && !t.lost; a++) {
+      await t.send(fmt === 'sn'
+        ? await nbWrap(cc, 0x04, 0x5D, 0x00, c.challenge)
+        : await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, 0x04, 0x5D, 0x00, ...c.challenge])), l => log('  ' + l));
+      const ta = Date.now();
+      while (Date.now() - ta < 700 && !c.O) {
+        const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+        let d = await nbParse(cc, f);
+        if (!d && fmt === 'cpt0') { const r = await nbOpen0(cle, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D) { c.O = true; c.M = true; log('  ← 5D ' + r.pt[6] + ' déchiffré (cpt0 ' + lab + ') ✓'); } }
+        if (!c.O && d && d.cmd === 0x5D && d.arg === 1) { c.O = true; log('  ← 5D 01 déchiffré (' + lab + ') ✓'); }
+      }
+    }
+    if (c.O) { log('étape 3 ✓ appariement complet — LA BONNE COMBINAISON ÉTAIT : ' + lab); break; }
+  }
+  if (!c.O) await etape3(6); // dernier recours : SN session en boucle
   if (!c.O) log('étape 3 non confirmée — les lectures tentent, puis la reprise confirmera');
   if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera');
   else {
