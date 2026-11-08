@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.36';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.37';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -704,14 +704,17 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
     }
     if (!c.L) throw new Error('salut sans réponse');
   }
-  const s1 = c.buildGetRandom(0x04);
-  for (let a = 0; a < 6 && !c.L; a++) { // étape 1 : la trottinette répond jeton + série (jusqu'à 6 essais)
-    log(`étape 1 · essai ${a + 1} (compteur ${c.counter})`);
-    await t.send(await c.encrypt(s1));
-    for (let i = 0; i < 15 && !c.L; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
-    if (!c.L) await sleep(300);
-  }
-  if (!c.L) throw new Error('étape 1 : pas de réponse (trottinette allumée ? appli Segway fermée ?)');
+  const etape1 = async () => {
+    const s1 = c.buildGetRandom(0x04);
+    for (let a = 0; a < 6 && !c.L && !t.lost; a++) {
+      log(`étape 1 · essai ${a + 1} (compteur ${c.counter})`);
+      await t.send(await c.encrypt(s1));
+      for (let i = 0; i < 15 && !c.L; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
+      if (!c.L) await sleep(300);
+    }
+    if (!c.L) throw new Error('étape 1 : pas de réponse (trottinette allumée ? appli Segway fermée ?)');
+  };
+  await etape1();
   log(`étape 1 ✓ jeton reçu · série « ${hexAscii(toHex(c.challenge))} »${c.pwdStored ? ' · un secret est déjà enregistré (INDEX=' + c.pwdStored + '), le nouveau le remplacera' : ''}`);
   const etape3 = async (nTries) => { // SHU D0() : écho de la série (0x5D) toutes les 500 ms jusqu'au 5D 01
     for (let a = 0; a < nTries && !c.O && !t.lost; a++) {
@@ -721,11 +724,28 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
     }
     log(c.O ? 'étape 3 ✓ appariement complet (5D 01)' : 'étape 3 sans réponse');
   };
-  if (resume) { // SHU : setRandomAppData(persisté) puis D0 (0x5D) ×6 toutes les 500 ms — si pas de 5D 01, efface et passe en appairage complet
-    await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
+  if (resume) {
+    // REPRISE SHU AUTHENTIQUE (Q0) : PAS d'étape 1 — clé = SHA1(secret ‖ zéros16), 0x5D cpt0 avec challenge vide
+    await c.setRandomAppData(fromHex(resume)); c.M = true; // jeton = zéros à ce stade → clé = SHA1(secret ‖ zéros)
+    log('reprise SHU : 0x5D cpt0 (challenge zéro, clé secret‖zéros)…');
+    const d0 = Uint8Array.from([0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
+    for (let a = 0; a < 3 && !c.O && !t.lost; a++) {
+      await t.send(await c.encrypt(d0), l => log('  ' + l)); // compteur 0 → format cpt0, comme le vrai SHU
+      const ta = Date.now();
+      while (Date.now() - ta < 700 && !c.O) {
+        const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+        const d = await nbParse(c, f);
+        if (d && d.cmd === 0x5D && d.arg === 1) { c.O = true; c.M = true; log('  ← 5D 01 : reprise SHU confirmée ✓'); }
+        else if (d) log('  ← réponse : cmd=0x' + d.cmd.toString(16) + ' arg=0x' + d.arg.toString(16));
+      }
+    }
+    if (c.O) { log('reprise SHU complète ✓'); return true; }
+    log('reprise SHU sans réponse — essai de la reprise par jeton (0x5B)…');
+    await etape1();
+    await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret avec le nouveau jeton');
     await etape3(6);
     if (c.O) return true;
-    c.counter = 0; await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : compteur à zéro + retour à l'état post-jeton (le 1er o1 du repli repart en cpt0)
+    c.counter = 0; await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : compteur à zéro + retour à l'état post-jeton
     log('reprise non confirmée — efface le secret, passage en appairage complet (comme SHU)');
   }
   // SHU Q0() : le secret est généré UNE seule fois et le MÊME renvoyé à chaque tentative —
