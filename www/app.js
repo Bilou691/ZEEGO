@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.27';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.28';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -754,6 +754,34 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
   await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
   await etape3(24); // SHU : D0 toutes les 500 ms jusqu'au 5D 01
   if (!c.O) log('étape 3 non confirmée — les lectures tentent, puis la reprise confirmera');
+  if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera');
+  else {
+    // DISSECTION : quelle combinaison format × clé fait répondre la trottinette ?
+    const keyPre = await nbKey(c.name, c.token); // clé courante nom‖jeton
+    const keyInit = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
+    const essaisLecture = [
+      ['SN · clé de session', c, null],
+      ['cpt0 · clé courante', 'cpt0', keyPre],
+      ['cpt0 · clé initiale', 'cpt0', keyInit],
+      ['SN · clé courante', 'sn', keyPre]
+    ];
+    for (const [lab, mode, cle] of essaisLecture) {
+      log('essai lecture batterie · ' + lab + '…');
+      const cc = mode === 'cpt0' ? c : Object.assign(Object.create(c), { key: cle });
+      await t.send(mode === 'cpt0'
+        ? await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x02, 0x3E, 0x16, 0x01, 0x55, 0x02]))
+        : await nbWrap(cc, 0x16, 0x01, 0x55, Uint8Array.from([2])), l => log('  ' + l));
+      const t0 = Date.now(); let vu = null;
+      while (Date.now() - t0 < 900 && !vu) {
+        const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+        let d = await nbParse(c, f);
+        if (!d) { const r = await nbOpen0(cle, f); if (r.ok && r.pt[5] === 0x04) d = { payload: r.pt.slice(7) }; }
+        if (d && (d.payload || d.pt)) { const p = d.payload || d.pt; vu = p; log(`  ← RÉPONSE [${lab}] : ${(toHex(p).match(/../g) || []).join(' ')}`); }
+      }
+      if (vu) break;
+    }
+    log('fin de la dissection — la reprise tentera les lectures confirmées');
+  }
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
 }
