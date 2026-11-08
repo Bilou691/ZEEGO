@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.18';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.19';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -736,45 +736,38 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     await sleep(5000); // laisser le geste se faire AVANT l'o1 (fenêtre OOB)
     const init = c.buildPairInit(dst);
     c.random.set(init.slice(7, 23)); // notre secret pour la clé de session
+    const keySess = await nbKey(c.random, c.token); // la trottinette adopte SHA1(secret‖jeton) dès qu'elle traite l'o1
     await t.send(await nbSeal0(key0, init)); // UNE SEULE FOIS
-    let acc = false, asked = false;
+    let acc = false, asked = false, lastArg = -1;
     const t1 = Date.now();
     while (Date.now() - t1 < 45000 && !acc && !t.lost) {
       const f = await t.recv(100); if (!f) continue;
-      let cmd = -1, arg = -1;
+      let cmd = -1, arg = -1, via = '';
       if (f[f.length - 2] === 0 && f[f.length - 1] === 0) { // format compteur 0 (celui de l'appairage)
         const r = await nbOpen0(key0, f);
-        if (r.ok) { cmd = r.pt[5]; arg = r.pt[6]; }
-      } else { // format SN — possible une fois la session basculée
+        if (r.ok) { cmd = r.pt[5]; arg = r.pt[6]; via = 'compteur 0'; }
+      }
+      if (cmd !== 0x5C) { // format SN — la réponse peut partir sous la clé de session qu'elle vient d'adopter (v1.4.18 : trame SN compteur 2 !)
         const d = await nbParse(c, f);
-        if (d) { cmd = d.cmd; arg = d.arg; }
+        if (d && d.cmd === 0x5C) { cmd = d.cmd; arg = d.arg; via = 'clé courante'; }
+        else if (c.L) {
+          c.key = keySess;
+          const d2 = await nbParse(c, f);
+          if (d2 && d2.cmd === 0x5C) { cmd = d2.cmd; arg = d2.arg; via = 'clé de session'; }
+          else c.key = await nbKey(c.name, c.token); // mauvaise piste : on restaure la clé courante
+        }
       }
       if (cmd !== 0x5C) continue;
+      lastArg = arg;
+      log(`← 5C 0${arg} déchiffré (${via})`);
       if (arg === 1) acc = true;
-      else if (!asked && oob !== 'none') { asked = true; log('⏺ 5C 00 : la trottinette attend — BASCULE LE PHARE maintenant, puis toutes les ~5 s…'); }
+      else if (!asked && oob !== 'none') { asked = true; log('⏺ la trottinette attend — BASCULE LE PHARE maintenant, puis toutes les ~5 s…'); }
       else if (!asked) { asked = true; log('⏺ 5C 00 reçu — ne touche à rien, on attend la validation…'); }
     }
-    if (!acc) throw new Error(oob === 'none' ? 'pas de 5C 01 (le phare était-il allumé au départ ?)' : 'pas de 5C 01 en 45 s (phare basculé pendant la fenêtre ?)');
+    if (!acc) throw new Error('pas de 5C 01 (dernier arg vu : ' + lastArg + ')');
     log('étape 2 ✓ secret accepté (5C 01)');
-    // jeton : obtenu par l'étape 1, tentée APRÈS l'appairage au format compteur 0
-    const s1 = c.buildGetRandom(dst);
-    for (let a = 0; a < 3 && !c.L && !t.lost; a++) {
-      await t.send(await nbSeal0(key0, s1));
-      const ta = Date.now();
-      while (Date.now() - ta < 2000 && !c.L) {
-        const f = await t.recv(80); if (!f) continue;
-        if (f[f.length - 2] === 0 && f[f.length - 1] === 0) {
-          const r = await nbOpen0(key0, f);
-          if (r.ok && r.pt.length >= 37 && r.pt[2] === 0x1E && r.pt[4] === 0x3E && r.pt[5] === 0x5B) {
-            c.token.set(r.pt.slice(7, 23)); c.challenge.set(r.pt.slice(23, 37)); c.L = true;
-            log('étape 1 (post-appairage) ✓ jeton reçu · série « ' + hexAscii(toHex(c.challenge)) + ' »');
-          }
-        } else await nbParse(c, f);
-      }
-      if (!c.L) await sleep(400);
-    }
-    if (c.L) { await c.setRandomAppData(c.random); c.counter = 1; c.M = true; } // clé de session = SHA1(secret‖jeton)
-    else log('pas de jeton en direct — la reconnexion en mode reprise s’en chargera');
+    await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton) — déjà adoptée par la trottinette, le compteur continue tout seul
+    if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera'); // (l'étape 1 a déjà tourné : NE PAS la refaire, elle ferait tourner le jeton)
   }
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
