@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.25';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.26';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -738,7 +738,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
   let mFlag = false, asked = false;
   const t1 = Date.now();
   while (Date.now() - t1 < 90000 && !mFlag && !t.lost) {
-    await t.send(await nbSeal0(key0, init)); // octets identiques à chaque renvoi (format cpt0, 3 acceptations à son actif)
+    await t.send(await c.encrypt(init)); // SHU : chaque renvoi passe dans encrypt() → compteur croissant (octets identiques = rejeu → coupure)
     const t2 = Date.now();
     while (Date.now() - t2 < 500 && !mFlag && !t.lost) {
       const f = await t.recv(60); if (!f) continue;
