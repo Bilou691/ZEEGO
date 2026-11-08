@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.31';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.32';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -693,7 +693,7 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
 // ---------- Poignée de main en 3 étapes (flot SHU, cf. pepperonas/zt3_cli/handshake.py) ----------
 // PORTÉE VOLONTAIREMENT LIMITÉE : session établie pour LIRE (batterie, kilométrage…).
 // Aucune commande de conduite (ni verrouillage, ni réglages, ni firmware).
-async function nbHandshake(t, c, resume, log, onButton, variant) {
+async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
   if (variant && variant.hello) { // réplique du 1er fil réel SHU (Phase B/E2) : salut 0x5C VIDE, sans 0x5B préalable
     const h = Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, variant.dst || 0x04, 0x5C, 0x00]);
     for (let a = 0; a < 6 && !c.L; a++) {
@@ -746,7 +746,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
       let d = await nbParse(c, f);
       if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
       if (d && d.cmd === 0x5C) {
-        if (d.arg === 1) { mFlag = true; log(`← 5C 01 : secret ACCEPTÉ ✓ (après ${n} envois)`); }
+        if (d.arg === 1) { mFlag = true; log(`← 5C 01 : secret ACCEPTÉ ✓ (après ${n} envois)`); onAccepted && onAccepted(toHex(c.random)); }
         else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
       }
     }
@@ -760,24 +760,27 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     // DISSECTION : quelle combinaison format × clé fait répondre la trottinette ?
     const keyPre = await nbKey(c.name, c.token); // clé courante nom‖jeton
     const keyInit = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
+    const keySess = await nbKey(c.random, c.token); // clé de session secret‖jeton
     const essaisLecture = [
-      ['SN · clé de session', c, null],
-      ['cpt0 · clé courante', 'cpt0', keyPre],
-      ['cpt0 · clé initiale', 'cpt0', keyInit],
-      ['SN · clé courante', 'sn', keyPre]
+      ['cpt0 · clé courante nom‖jeton', 'cpt0', keyPre, 0x16],
+      ['SN · clé de session secret‖jeton', 'sn', keySess, 0x16],
+      ['cpt0 · clé initiale nom‖sel', 'cpt0', keyInit, 0x16],
+      ['SN · clé courante nom‖jeton', 'sn', keyPre, 0x16],
+      ['cpt0 · clé initiale → carte BLE 0x04', 'cpt0', keyInit, 0x04]
     ];
-    for (const [lab, mode, cle] of essaisLecture) {
+    for (const [lab, fmt, cle, board] of essaisLecture) {
       log('essai lecture batterie · ' + lab + '…');
-      const cc = mode === 'cpt0' ? c : Object.assign(Object.create(c), { key: cle });
-      await t.send(mode === 'cpt0'
-        ? await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x02, 0x3E, 0x16, 0x01, 0x55, 0x02]))
-        : await nbWrap(cc, 0x16, 0x01, 0x55, Uint8Array.from([2])), l => log('  ' + l));
+      const cc = Object.assign(Object.create(c), { key: cle });
+      await t.send(fmt === 'cpt0'
+        ? await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x02, 0x3E, board, 0x01, 0x55, 0x02]))
+        : await nbWrap(cc, board, 0x01, 0x55, Uint8Array.from([2])), l => log('  ' + l));
       const t0 = Date.now(); let vu = null;
       while (Date.now() - t0 < 900 && !vu) {
         const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
-        let d = await nbParse(c, f);
-        if (!d) { const r = await nbOpen0(cle, f); if (r.ok && r.pt[5] === 0x04) d = { payload: r.pt.slice(7) }; }
-        if (d && (d.payload || d.pt)) { const p = d.payload || d.pt; vu = p; log(`  ← RÉPONSE [${lab}] : ${(toHex(p).match(/../g) || []).join(' ')}`); }
+        let p = null;
+        const d = await nbParse(c, f); if (d && d.cmd === 0x04) p = d.payload;
+        if (!p) { const r = await nbOpen0(cle, f); if (r.ok && r.pt[5] === 0x04) p = r.pt.slice(7); }
+        if (p) { vu = p; log(`  ← RÉPONSE [${lab}] : ${(toHex(p).match(/../g) || []).join(' ')}`); }
       }
       if (vu) break;
     }
@@ -971,7 +974,7 @@ async function blePair() {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
         const invite = '\n⏺ RÈGLE D’OR PENDANT LES 90 s : le phare doit rester ALLUMÉ en permanence — allume-le maintenant s’il est éteint, et NE L’ÉTEINS SURTOUT PAS : chaque extinction peut annuler l’appairage (la liaison coupe exactement là)…\n';
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite));
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) })); // le secret est sauvé DÈS le 5C 01 (un crash ne doit pas le perdre)
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
         // comme SHU : on déconnecte, on souffle, et on reprend en mode reprise (le chemin éprouvé).
