@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.20';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.21';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -833,23 +833,25 @@ const sc = {
     }
     this.renderHook && this.renderHook();
   },
-  async connect(quiet) {
+  async connect(quiet, sink) {
     if (!BLE || !this.stored() || this.state === 'connecting') return this.state === 'live';
     if (this.state === 'live') { this.startLoop(); return true; }
     const rec = store.get('scooter');
+    const say = m => { this.say(m); sink && sink(m); };
     this.state = 'connecting'; this.fails = 0; this.render();
     try {
       await BLE.initialize({ androidNeverForLocation: true });
       const t = await nbConnect(rec.id, null);
       const c = new NbCrypto(rec.name || 'ZT3');
-      await nbHandshake(t, c, rec.random || rec.password, l => this.say(l)); // « password » = anciens enregistrements
+      say('reprise : connexion…');
+      await nbHandshake(t, c, rec.random || rec.password, say); // « password » = anciens enregistrements
       store.set('scooter', { ...rec, random: toHex(c.random) });
-      this.t = t; this.c = c; this.state = 'live'; this.say('connectée ✓'); this.render();
+      this.t = t; this.c = c; this.state = 'live'; say('connectée ✓'); this.render();
       this.startLoop(); this.poll();
       return true;
     } catch (e) {
       this.err = e && (e.message || e.errorMessage) || String(e);
-      this.say('connexion impossible : ' + this.err);
+      say('connexion impossible : ' + this.err);
       if (this.t) { try { await this.t.close(); } catch {} this.t = null; }
       this.state = 'error'; this.render();
       if (!quiet) toast('Trottinette injoignable 🛴');
@@ -957,19 +959,20 @@ async function blePair() {
           : '\n⏺ BASCULE LE PHARE toutes les ~5 s (appui bref sur le bouton) pendant la fenêtre de 45 s, jusqu’à ce que le journal affiche « secret accepté »…\n';
         await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), v);
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
-        let lu = 0; // lectures de confirmation
-        for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
-          const p = await nbReadReg(t, c, r.d, r.r, r.n);
-          if (p) { lu++; log(`${r.lab} : ${r.dec(p)}  [${(toHex(p).match(/../g) || []).join(' ')}]`); }
-          else log(`${r.lab} : pas de réponse`);
+        // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
+        // comme SHU : on déconnecte, on souffle, et on reprend en mode reprise (le chemin éprouvé).
+        log('secret accepté ✓ — déconnexion puis reprise pour les lectures…');
+        try { await t.close(); } catch {} t = null;
+        await sleep(3000);
+        let lu = 0;
+        if (await sc.connect(true, l => log('  ' + l))) {
+          await sleep(1200); await sc.poll();
+          if (sc.data && (sc.data.battery || sc.data.odometer)) {
+            lu = 1;
+            log('Batterie : ' + sc.data.battery.v + ' · Km total : ' + sc.data.odometer.v);
+          }
         }
-        if (!lu) { // repli : reconnexion en mode reprise (chemin éprouvé sur le terrain)
-          log('\nlecture directe sans réponse — reconnexion en mode reprise…');
-          try { await t.close(); } catch {} t = null;
-          await sleep(1500);
-          if (await sc.connect(true)) { await sc.poll(); if (sc.data && (sc.data.battery || sc.data.odometer)) lu = 1; }
-        }
-        if (!lu) throw new Error('secret accepté mais aucune lecture ne répond');
+        if (!lu) throw new Error('la reprise n’a pas abouti — vois les lignes « reprise » ci-dessus');
         log('\nSession confirmée ✓ Trotti est associée à ta trottinette.');
         if (t) { // session directe : on la transfère au moteur
           await sc.stop(); sc.t = t; sc.c = c; sc.state = 'live'; sc.data = sc.data || {}; sc.startLoop(); sc.poll(); sc.render();
