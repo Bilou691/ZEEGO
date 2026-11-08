@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.24';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.25';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -613,7 +613,7 @@ class NbCrypto {
       this.token.set(out.slice(7, 23)); this.challenge.set(out.slice(23, 37));
       await this.deriveKey(this.name, this.token); this.L = true; this.pwdStored = out[6];
     }
-    if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5C && (out[6] === 0 || out[6] === 1)) { // étape 2 : ACK (le firmware ZT3 répond arg=0x00)
+    if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5C && out[6] === 1) { // étape 2 acceptée — SHU ne pose M QUE sur arg=1 (arg=0 = « j'attends le phare »)
       await this.deriveKey(this.random, this.token); this.M = true;
     }
     if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5D && out[6] === 1) { this.O = true; this.M = true; } // étape 3
@@ -713,94 +713,47 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
   }
   if (!c.L) throw new Error('étape 1 : pas de réponse (trottinette allumée ? appli Segway fermée ?)');
   log(`étape 1 ✓ jeton reçu · série « ${hexAscii(toHex(c.challenge))} »${c.pwdStored ? ' · un secret est déjà enregistré (INDEX=' + c.pwdStored + '), le nouveau le remplacera' : ''}`);
-  const etape3 = async () => { // écho de la série (0x5D) — SHU le fait toujours avant de lire, sans ça les lectures restent muettes
-    for (let a = 0; a < 4 && !c.O && !t.lost; a++) {
-      await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge));
-      for (let i = 0; i < 15 && !c.O; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
-      if (!c.O) await sleep(300);
-    }
-    log(c.O ? 'étape 3 ✓ appariement complet' : 'étape 3 sans réponse — les lectures diront');
-  };
-  if (resume) { // étape 2 en reprise : on réinjecte le secret déjà enregistré, rien à envoyer
-    await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
-    await etape3();
-  } else {
-    const dst = (variant && variant.dst) || 0x04;
-    const oob = (variant && variant.oob) || 'toggle';
-    const key0 = await nbKey(c.name, NB_FW); // clé initiale (nom‖sel) — la seule qui a reçu un ACK sur le fil réel (v1.4.16)
-    // APPAIRAGE À L'ÉTAT VIERGE : l'ACK du salut n'a JAMAIS été obtenu après l'étape 1 (v1.4.17 l'a prouvé),
-    // et répéter l'o1 fait couper la liaison (v1.4.14/17) — donc salut puis o1, chacun UNE fois, avant toute autre trame.
-    log(`étape 2 : appairage à l'état vierge (salut 5C puis o1 · format compteur 0 · clé initiale · dst 0x${dst.toString(16).padStart(2, '0')})…`);
-    let armed = false;
-    for (let a = 0; a < 3 && !armed && !t.lost; a++) {
-      await t.send(await nbSeal0(key0, Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, dst, 0x5C, 0x00])));
+  const etape3 = async (nTries) => { // SHU D0() : écho de la série (0x5D) toutes les 500 ms jusqu'au 5D 01
+    for (let a = 0; a < nTries && !c.O && !t.lost; a++) {
+      await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge), l => log('  ' + l));
       const ta = Date.now();
-      while (Date.now() - ta < 2500 && !armed) {
-        const f = await t.recv(80); if (!f) continue;
-        const r = await nbOpen0(key0, f);
-        if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) armed = true;
-      }
-      if (!armed) await sleep(500);
+      while (Date.now() - ta < 500 && !c.O) { const f = await t.recv(60, l => log('  ' + l)); if (f) await nbParse(c, f); }
     }
-    log(armed ? 'salut ✓ mode appairage armé (accusé 5C reçu)' : 'salut sans accusé — on tente quand même');
-    onButton && onButton();
-    await sleep(5000); // laisser le geste se faire AVANT l'o1 (fenêtre OOB)
-    const init = c.buildPairInit(dst);
-    c.random.set(init.slice(7, 23)); // notre secret pour la clé de session
-    const keySess = await nbKey(c.random, c.token); // la trottinette adopte SHA1(secret‖jeton) dès qu'elle traite l'o1
-    await t.send(await nbSeal0(key0, init)); // UNE SEULE FOIS
-    let acc = false, asked = false, lastArg = -1;
-    const t1 = Date.now();
-    while (Date.now() - t1 < 45000 && !acc && !t.lost) {
-      const f = await t.recv(100); if (!f) continue;
-      let cmd = -1, arg = -1, via = '';
-      if (f[f.length - 2] === 0 && f[f.length - 1] === 0) { // format compteur 0 (celui de l'appairage)
-        const r = await nbOpen0(key0, f);
-        if (r.ok) { cmd = r.pt[5]; arg = r.pt[6]; via = 'compteur 0'; }
+    log(c.O ? 'étape 3 ✓ appariement complet (5D 01)' : 'étape 3 sans réponse');
+  };
+  if (resume) { // SHU : setRandomAppData(persisté) puis D0 (0x5D) ×6 toutes les 500 ms — si pas de 5D 01, efface et passe en appairage complet
+    await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
+    await etape3(6);
+    if (c.O) return true;
+    await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : retour à l'état post-jeton
+    log('reprise non confirmée — efface le secret, passage en appairage complet (comme SHU)');
+  }
+  // SHU Q0() : o1 renvoyé TOUTES LES 500 ms avec le MÊME secret jusqu'au 5C 01 —
+  // chaque o1 arme une fenêtre d'acceptation de ~500 ms : la bascule du phare doit tomber dedans.
+  const init = c.buildPairInit(0x04);
+  c.random.set(init.slice(7, 23)); // notre secret, généré UNE seule fois (comme SHU)
+  const key0 = await nbKey(c.name, c.token); // clé courante nom‖jeton — celle des 5C 01 observés sur le fil
+  log('étape 2 : enregistrement du secret (o1 toutes les 500 ms jusqu’à acceptation)…');
+  onButton && onButton();
+  let mFlag = false, asked = false;
+  const t1 = Date.now();
+  while (Date.now() - t1 < 90000 && !mFlag && !t.lost) {
+    await t.send(await nbSeal0(key0, init)); // octets identiques à chaque renvoi (format cpt0, 3 acceptations à son actif)
+    const t2 = Date.now();
+    while (Date.now() - t2 < 500 && !mFlag && !t.lost) {
+      const f = await t.recv(60); if (!f) continue;
+      let d = await nbParse(c, f);
+      if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
+      if (d && d.cmd === 0x5C) {
+        if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓'); }
+        else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE en rythme (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
       }
-      if (cmd !== 0x5C) { // format SN — la réponse peut partir sous la clé de session qu'elle vient d'adopter (v1.4.18 : trame SN compteur 2 !)
-        const d = await nbParse(c, f);
-        if (d && d.cmd === 0x5C) { cmd = d.cmd; arg = d.arg; via = 'clé courante'; }
-        else if (c.L) {
-          c.key = keySess;
-          const d2 = await nbParse(c, f);
-          if (d2 && d2.cmd === 0x5C) { cmd = d2.cmd; arg = d2.arg; via = 'clé de session'; }
-          else c.key = await nbKey(c.name, c.token); // mauvaise piste : on restaure la clé courante
-        }
-      }
-      if (cmd !== 0x5C) continue;
-      lastArg = arg;
-      log(`← 5C 0${arg} déchiffré (${via})`);
-      if (arg === 1) acc = true;
-      else if (!asked && oob !== 'none') { asked = true; log('⏺ la trottinette attend — BASCULE LE PHARE maintenant, puis toutes les ~5 s…'); }
-      else if (!asked) { asked = true; log('⏺ 5C 00 reçu — ne touche à rien, on attend la validation…'); }
-    }
-    if (!acc) throw new Error('pas de 5C 01 (dernier arg vu : ' + lastArg + ')');
-    log('étape 2 ✓ secret accepté (5C 01)');
-    await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
-    if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera');
-    else {
-      // EXPÉRIENCE : à quel moment la trottinette bascule-t-elle sur la clé de session ?
-      // On essaye 0x5D puis une lecture, chacun sous les DEUX clés, tout est journalisé.
-      const keyPre = await nbKey(c.name, c.token); // clé courante — celle sous laquelle le 5C 01 est arrivé
-      const alt = Object.create(c); alt.key = keyPre;
-      const ecout = async (lab, cc, dst, cmd, arg, data) => {
-        await t.send(await nbWrap(cc, dst, cmd, arg, data), l => log('  ' + l));
-        const t0 = Date.now(); let vu = null;
-        while (Date.now() - t0 < 900 && !vu) {
-          const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
-          let d = await nbParse(c, f); if (!d) d = await nbParse(alt, f);
-          if (d) { vu = d; log(`  ← ${lab} : cmd=0x${d.cmd.toString(16)} arg=0x${d.arg.toString(16)} src=0x${d.src.toString(16)} [${(toHex(d.payload).match(/../g) || []).join(' ')}]`); }
-        }
-        return vu;
-      };
-      log('expérience 1 : 0x5D sous clé courante…'); await ecout('5D', alt, 0x04, 0x5D, 0x00, c.challenge);
-      log('expérience 2 : 0x5D sous clé de session…'); await ecout('5D', c, 0x04, 0x5D, 0x00, c.challenge);
-      log('expérience 3 : lecture batterie sous clé de session…'); const l3 = await ecout('lecture', c, 0x16, 0x01, 0x55, Uint8Array.from([2]));
-      if (!l3) { log('expérience 4 : lecture batterie sous clé courante…'); await ecout('lecture', alt, 0x16, 0x01, 0x55, Uint8Array.from([2])); }
-      log('fin des expériences — la reprise dira le reste');
     }
   }
+  if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare basculé en rythme pendant la fenêtre ? SHU/appli Segway fermées ?)');
+  await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
+  await etape3(24); // SHU : D0 toutes les 500 ms jusqu'au 5D 01
+  if (!c.O) log('étape 3 non confirmée — les lectures tentent, puis la reprise confirmera');
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
 }
@@ -982,18 +935,14 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
-    const variants = [{ oob: 'none' }, { oob: 'toggle' }, { dst: 0x21, oob: 'toggle' }]; // 1re hypothèse (Billel) : phare déjà allumé, ne rien toucher — comme avec l'appli Segway
     let ok = false;
-    for (let essai = 1; essai <= variants.length && !ok; essai++) {
-      if (essai > 1) { log(`\n— variante ${essai}/${variants.length} sur une connexion fraîche —`); await sleep(1500); }
-      const v = variants[essai - 1];
+    for (let essai = 1; essai <= 3 && !ok; essai++) { // jusqu'à 3 connexions fraîches — la boucle o1 est dedans (SHU Q0)
+      if (essai > 1) { log(`\n— tentative ${essai}/3 sur une connexion fraîche —`); await sleep(1500); }
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        const invite = v.oob === 'none'
-          ? '\n⏺ PHARE ALLUMÉ obligatoire : allume-le MAINTENANT s’il est éteint, puis n’y touche PLUS — test « phare allumé = appairage ouvert » (comme avec l’appli Segway). Fenêtre de 45 s…\n'
-          : '\n⏺ BASCULE LE PHARE toutes les ~5 s (appui bref sur le bouton) pendant la fenêtre de 45 s, jusqu’à ce que le journal affiche « secret accepté »…\n';
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), v);
+        const invite = '\n⏺ PENDANT 90 s : BASCULE LE PHARE toutes les ~2 s (appui bref sur le bouton) jusqu’à ce que le journal affiche « ACCEPTÉ »…\n';
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite));
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
         // comme SHU : on déconnecte, on souffle, et on reprend en mode reprise (le chemin éprouvé).
@@ -1026,7 +975,7 @@ async function blePair() {
         log('\nÉchec : ' + msg);
         if (/133|timeout/i.test(msg)) log('(éteins puis rallume la trottinette, attends 10 s, puis relance l’association)');
         if (t) { try { await t.close(); } catch {} t = null; }
-        if (essai === variants.length) {
+        if (essai === 3) {
           log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
           log('Plan B si ça bloque encore : un ancien secret est peut-être resté sur la trottinette (INDEX=1) — une réinitialisation d’usine depuis l’appli Segway officielle l’efface, puis relance l’association.');
         }

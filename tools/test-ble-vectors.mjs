@@ -110,13 +110,15 @@ console.log('\n[8] session complète simulée (téléphone ↔ trottinette simul
   ok(eq(phone.token, token) && eq(phone.challenge, chal), 'jeton + série capturés');
   ok(eq(phone.key, sha1_16(Buffer.from(name), token)), 'clé → SHA-1(nom ‖ jeton)');
 
-  // étape 2 : envoi du secret puis ACK arg=0x00 (comportement constaté du firmware ZT3)
+  // étape 2 : envoi du secret puis ACK arg=0x00 (en attente phare, PAS de M) puis arg=0x01 (accepté → M)
   await phone.encrypt(phone.buildPairInit(0x04));
   ok(phone.random.some(x => x), 'notre secret capturé à l’envoi de la trame 0x5C');
   const acker = new NbCrypto(name);
   acker.token.set(token); await acker.deriveKey(acker.name, token); acker.counter = phone.counter;
   await phone.decrypt(await acker.encrypt(Uint8Array.from([0x5A, 0xA5, 0x00, 0x04, 0x3E, 0x5C, 0x00])));
-  ok(phone.M, 'drapeau M (ACK arg=0x00 accepté — pas seulement 0x01)');
+  ok(!phone.M, 'arg=0 = en attente : pas de drapeau M (sémantique SHU)');
+  await phone.decrypt(await acker.encrypt(Uint8Array.from([0x5A, 0xA5, 0x00, 0x04, 0x3E, 0x5C, 0x01])));
+  ok(phone.M, 'drapeau M (ACK arg=0x01 = accepté)');
   ok(eq(phone.key, sha1_16(phone.random, token)), 'clé de session = SHA-1(secret ‖ jeton)');
 
   // étape 3 : renvoi de la série puis ACK 0x5D 01
