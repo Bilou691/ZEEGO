@@ -748,32 +748,67 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
     c.counter = 0; await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : compteur à zéro + retour à l'état post-jeton
     log('reprise non confirmée — efface le secret, passage en appairage complet (comme SHU)');
   }
-  // SHU Q0() : le secret est généré UNE seule fois et le MÊME renvoyé à chaque tentative —
-  // sinon la trottinette accepte le secret n°2 et on en sauvegarde un autre (ambiguïté fatale à la reprise).
-  // Un seul o1 par connexion : le firmware coupe après ~5 propositions, et le nouveau jeton rend les trames différentes.
-  const init = fixedRandom ? c.buildPairInit(0x04, fixedRandom) : c.buildPairInit(0x04);
-  c.random.set(init.slice(7, 23));
-  const key0 = await nbKey(c.name, c.token); // clé courante nom‖jeton — celle des acks 5C 01 observés
-  log('étape 2 : enregistrement du secret (3 o1 cpt0 espacés, même secret)…');
+  // Secrets UNIQUES à chaque o1 (le pattern qui a été accepté 5 fois) — max 4 par connexion (limite firmware),
+  // puis DISSECTION de la clé de session : quel secret la trottinette a-t-elle retenu ?
+  log('étape 2 : enregistrement du secret (4 o1 cpt0, un secret différent chacun)…');
   onButton && onButton();
-  let mFlag = false, asked = false, envoyes = 0;
-  const envoi = async () => { await t.send(await nbSeal0(key0, init)); envoyes++; };
+  let mFlag = false, asked = false;
+  const envoyes = []; // les secrets envoyés (hex), dans l'ordre — on testera lequel a été retenu
+  const envoi = async () => {
+    const init = c.buildPairInit(0x04);
+    const r = toHex(init.slice(7, 23));
+    envoyes.push(r); c.random.set(init.slice(7, 23));
+    await t.send(await nbSeal0(await nbKey(c.name, c.token), init));
+  };
   await envoi();
   const t1 = Date.now();
-  let d2 = false, d3 = false;
+  let d2 = false, d3 = false, d4 = false;
   while (Date.now() - t1 < 30000 && !mFlag && !t.lost) {
-    if (!d2 && Date.now() - t1 > 4000) { d2 = true; await envoi(); } // 2e et 3e envois à +4 s et +8 s (≤4 propositions par connexion)
+    if (!d2 && Date.now() - t1 > 4000) { d2 = true; await envoi(); } // o1 #2, #3, #4 à +4/8/12 s (≤4 propositions par connexion)
     if (!d3 && Date.now() - t1 > 8000) { d3 = true; await envoi(); }
+    if (!d4 && Date.now() - t1 > 12000) { d4 = true; await envoi(); }
     const f = await t.recv(60); if (!f) continue;
     let d = await nbParse(c, f);
-    if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
+    if (!d) { const r = await nbOpen0(await nbKey(c.name, c.token), f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
     if (d && d.cmd === 0x5C) {
-      if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓ (après ' + envoyes + ' envois)'); onAccepted && onAccepted(toHex(c.random)); }
-      else if (!asked) { asked = true; log('⏺ 5C 00 : la fenêtre est armée — ALLUME LE PHARE maintenant si ce n’est pas fait…'); }
+      if (d.arg === 1) { mFlag = true; log(`← 5C 01 : ACCEPTÉ ✓ (après ${envoyes.length} envois)`); }
+      else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
     }
   }
   if (!mFlag) throw new Error('pas de 5C 01 sur cette connexion (le secret est inchangé, la tentative suivante le réutilise)');
-  await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
+  // DISSECTION DE LA CLÉ : quel secret envoyé la trottinette a-t-elle retenu ?
+  const keyPre = await nbKey(c.name, c.token); // clé courante nom‖jeton
+  const keyInit = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
+  await c.setRandomAppData(c.random); c.M = true; // pari : le dernier envoyé (vérifié juste après)
+  const essaisCle = [c.random, ...envoyes.slice().reverse().filter(x => x !== toHex(c.random)).map(x => fromHex(x)), keyInit];
+  const essaisNoms = ['dernier envoyé', ...envoyes.slice().reverse().filter(x => x !== toHex(c.random)).map((_, i) => 'envoi n°' + (envoyes.length - i)), 'clé initiale nom‖sel'];
+  let trouve = null;
+  for (let i = 0; i < essaisCle.length && !trouve; i++) {
+    const kSess = await nbKey(essaisCle[i], c.token);
+    log('dissection : lecture batterie sous la clé de session « ' + essaisNoms[i] + ' »…');
+    const cc = Object.assign(Object.create(c), { key: kSess });
+    for (const fmt of ['sn', 'cpt0']) {
+      await t.send(fmt === 'sn'
+        ? await nbWrap(cc, 0x16, 0x01, 0x55, Uint8Array.from([2]))
+        : await nbSeal0(kSess, Uint8Array.from([0x5A, 0xA5, 0x02, 0x3E, 0x16, 0x01, 0x55, 0x02])), l => log('  ' + l));
+      const ta = Date.now(); let p = null;
+      while (Date.now() - ta < 800 && !p) {
+        const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+        const dd = await nbParse(cc, f); if (dd && dd.cmd === 0x04) { p = dd.payload; }
+        if (!p) { const r = await nbOpen0(kSess, f); if (r.ok && r.pt[5] === 0x04) p = r.pt.slice(7); }
+        if (p) log(`  ← RÉPONSE [${lab} · ${fmt}] : ${(toHex(p).match(/../g) || []).join(' ')}`);
+      }
+      if (p) { trouve = essaisCle[i]; break; }
+    }
+    if (trouve) break;
+  }
+  if (trouve) {
+    await c.setRandomAppData(trouve); // on aligne la clé de session sur le secret retenu
+    onAccepted && onAccepted(toHex(trouve));
+    log('clé de session identifiée ✓ : ' + toHex(trouve));
+  } else {
+    log('aucune clé ne répond — la reprise tentera sa chance');
+  }
   // 0x5D : essais dans les 4 combinaisons format × clé (SN-session seul avait été testé, jamais avec un 5C 01 valide !)
   const keyPreD = await nbKey(c.name, c.token); // clé courante nom‖jeton
   const keyInitD = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
