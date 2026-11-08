@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.16';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.17';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -715,28 +715,46 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
   } else {
     const dst = (variant && variant.dst) || 0x04;
-    const key0 = variant && variant.key0 ? await nbKey(c.name, NB_FW) : c.key; // clé initiale ou clé courante (nom‖jeton)
-    log(`étape 2 : enregistrement du secret (format compteur 0, clé ${variant && variant.key0 ? 'initiale' : 'nom‖jeton'}, destinataire 0x${dst.toString(16).padStart(2, '0')})…`);
+    const key0 = variant && variant.key0 ? await nbKey(c.name, NB_FW) : c.key; // clé courante (nom‖jeton) ou initiale
+    log(`étape 2 : armement du mode appairage (salut 0x5C vide · format compteur 0 · clé ${variant && variant.key0 ? 'initiale' : 'nom‖jeton'} · dst 0x${dst.toString(16)})…`);
+    let armed = false; // le salut vide a PRÉUVÉ qu'il obtient un ACK 5C 00 sur le fil réel
+    for (let a = 0; a < 3 && !armed && !t.lost; a++) {
+      await t.send(await nbSeal0(key0, Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, dst, 0x5C, 0x00])));
+      const ta = Date.now();
+      while (Date.now() - ta < 1200 && !armed) {
+        const f = await t.recv(60); if (!f) continue;
+        if (f[f.length - 2] === 0 && f[f.length - 1] === 0) {
+          const r = await nbOpen0(key0, f);
+          if (r.ok && r.pt[5] === 0x5C) armed = true;
+        }
+      }
+      if (!armed) await sleep(400);
+    }
+    log(armed ? 'mode appairage armé ✓ (5C 00 reçu)' : 'salut sans accusé — on tente quand même');
+    // L'appli officielle RENVOIE le SET_PWD toutes les ~2 s pendant 60 s en attendant l'appui (doc NinebotCrypto) —
+    // c'est ce qui ouvre la fenêtre OOB du phare. Un envoi unique passe à côté.
     onButton && onButton();
-    await sleep(5000); // fenêtre : l'o1 doit partir pendant que la trottinette accepte un nouveau secret
     const init = c.buildPairInit(dst);
     c.random.set(init.slice(7, 23)); // notre secret, retenu pour la clé de session
-    await t.send(await nbSeal0(key0, init)); // PENDANT l'appairage la trottinette ne parle qu'en format compteur 0 (vu sur le fil réel)
     let acc = false, asked = false;
-    const t0 = Date.now();
-    while (Date.now() - t0 < 30000 && !acc && !t.lost) { // 5C 00 = en attente du bouton, 5C 01 = accepté
-      const f = await t.recv(80); if (!f) continue;
-      if (f[f.length - 2] === 0 && f[f.length - 1] === 0) { // format compteur 0 (comme l'ACK observé)
-        const r = await nbOpen0(key0, f);
-        if (!r.ok || r.pt[5] !== 0x5C) continue;
-        if (r.pt[6] === 1) acc = true;
-        else if (!asked) { asked = true; log('⏺ la trottinette attend la confirmation : BASCULE LE PHARE (appui bref)…'); }
-      } else { // format SN — possible après acceptation
-        const d = await nbParse(c, f);
-        if (d && d.cmd === 0x5C) { if (d.arg === 1) acc = true; else if (!asked) { asked = true; log('⏺ BASCULE LE PHARE (appui bref)…'); } }
+    const t1 = Date.now();
+    while (Date.now() - t1 < 60000 && !acc && !t.lost) {
+      await t.send(await nbSeal0(key0, init));
+      const t2 = Date.now();
+      while (Date.now() - t2 < 2000 && !acc && !t.lost) {
+        const f = await t.recv(80); if (!f) continue;
+        if (f[f.length - 2] === 0 && f[f.length - 1] === 0) { // format compteur 0 (celui de l'appairage)
+          const r = await nbOpen0(key0, f);
+          if (!r.ok || r.pt[5] !== 0x5C) continue;
+          if (r.pt[6] === 1) acc = true;
+          else if (!asked) { asked = true; log('⏺ 5C 00 reçu : BASCULE LE PHARE maintenant (et toutes les ~5 s si rien ne bouge)…'); }
+        } else { // format SN — possible après acceptation
+          const d = await nbParse(c, f);
+          if (d && d.cmd === 0x5C) { if (d.arg === 1) acc = true; else if (!asked) { asked = true; log('⏺ BASCULE LE PHARE…'); } }
+        }
       }
     }
-    if (!acc) throw new Error('pas de 5C 01 : secret refusé (phare basculé pendant la fenêtre ? SHU/appli Segway fermées ?)');
+    if (!acc) throw new Error('pas de 5C 01 en 60 s (phare basculé pendant la boucle ? SHU/appli Segway fermées ?)');
     log('étape 2 ✓ secret accepté (5C 01)');
     await c.setRandomAppData(c.random); // clé de session = SHA1(secret‖jeton)
     for (let a = 0; a < 4 && !c.O && !t.lost; a++) { // étape 3 : renvoi de la série (toléré)
@@ -918,7 +936,7 @@ async function blePair() {
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ DÈS QUE C’EST DEMANDÉ : bascule le PHARE (appui bref sur le bouton) — répète si rien ne bouge…\n'), variants[essai - 1]);
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ PENDANT LA PROCHAINE MINUTE : bascule le PHARE toutes les ~5 s (appui bref sur le bouton) jusqu’à ce que le journal affiche « secret accepté »…\n'), variants[essai - 1]);
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         let lu = 0; // lectures de confirmation
         for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
@@ -943,7 +961,7 @@ async function blePair() {
       } catch (e) {
         const msg = e && (e.message || e.errorMessage) || String(e);
         log('\nÉchec : ' + msg);
-        if (/133/.test(msg)) log('(erreur 133 : éteins puis rallume la trottinette, puis relance l’association)');
+        if (/133|timeout/i.test(msg)) log('(éteins puis rallume la trottinette, attends 10 s, puis relance l’association)');
         if (t) { try { await t.close(); } catch {} t = null; }
         if (essai === variants.length) {
           log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
