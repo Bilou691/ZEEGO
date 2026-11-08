@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.28';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.29';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -746,11 +746,11 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
       if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
       if (d && d.cmd === 0x5C) {
         if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓'); }
-        else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE en rythme (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
+        else if (!asked) { asked = true; log('⏺ 5C 00 : la trottinette attend — vérifie que le PHARE est bien ALLUMÉ et LAISSE-LE allumé…'); }
       }
     }
   }
-  if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare basculé en rythme pendant la fenêtre ? SHU/appli Segway fermées ?)');
+  if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare resté allumé sans extinction pendant la fenêtre ? SHU/appli Segway fermées ?)');
   await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
   await etape3(24); // SHU : D0 toutes les 500 ms jusqu'au 5D 01
   if (!c.O) log('étape 3 non confirmée — les lectures tentent, puis la reprise confirmera');
@@ -969,7 +969,7 @@ async function blePair() {
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        const invite = '\n⏺ PENDANT 90 s : BASCULE LE PHARE toutes les ~2 s (appui bref sur le bouton) jusqu’à ce que le journal affiche « ACCEPTÉ »…\n';
+        const invite = '\n⏺ RÈGLE D’OR PENDANT LES 90 s : le phare doit rester ALLUMÉ en permanence — allume-le maintenant s’il est éteint, et NE L’ÉTEINS SURTOUT PAS : chaque extinction peut annuler l’appairage (la liaison coupe exactement là)…\n';
         await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite));
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
