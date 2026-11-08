@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.17';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.18';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -715,54 +715,66 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
   } else {
     const dst = (variant && variant.dst) || 0x04;
-    const key0 = variant && variant.key0 ? await nbKey(c.name, NB_FW) : c.key; // clé courante (nom‖jeton) ou initiale
-    log(`étape 2 : armement du mode appairage (salut 0x5C vide · format compteur 0 · clé ${variant && variant.key0 ? 'initiale' : 'nom‖jeton'} · dst 0x${dst.toString(16)})…`);
-    let armed = false; // le salut vide a PRÉUVÉ qu'il obtient un ACK 5C 00 sur le fil réel
+    const oob = (variant && variant.oob) || 'toggle';
+    const key0 = await nbKey(c.name, NB_FW); // clé initiale (nom‖sel) — la seule qui a reçu un ACK sur le fil réel (v1.4.16)
+    // APPAIRAGE À L'ÉTAT VIERGE : l'ACK du salut n'a JAMAIS été obtenu après l'étape 1 (v1.4.17 l'a prouvé),
+    // et répéter l'o1 fait couper la liaison (v1.4.14/17) — donc salut puis o1, chacun UNE fois, avant toute autre trame.
+    log(`étape 2 : appairage à l'état vierge (salut 5C puis o1 · format compteur 0 · clé initiale · dst 0x${dst.toString(16).padStart(2, '0')})…`);
+    let armed = false;
     for (let a = 0; a < 3 && !armed && !t.lost; a++) {
       await t.send(await nbSeal0(key0, Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, dst, 0x5C, 0x00])));
       const ta = Date.now();
-      while (Date.now() - ta < 1200 && !armed) {
-        const f = await t.recv(60); if (!f) continue;
-        if (f[f.length - 2] === 0 && f[f.length - 1] === 0) {
-          const r = await nbOpen0(key0, f);
-          if (r.ok && r.pt[5] === 0x5C) armed = true;
-        }
+      while (Date.now() - ta < 2500 && !armed) {
+        const f = await t.recv(80); if (!f) continue;
+        const r = await nbOpen0(key0, f);
+        if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) armed = true;
       }
-      if (!armed) await sleep(400);
+      if (!armed) await sleep(500);
     }
-    log(armed ? 'mode appairage armé ✓ (5C 00 reçu)' : 'salut sans accusé — on tente quand même');
-    // L'appli officielle RENVOIE le SET_PWD toutes les ~2 s pendant 60 s en attendant l'appui (doc NinebotCrypto) —
-    // c'est ce qui ouvre la fenêtre OOB du phare. Un envoi unique passe à côté.
+    log(armed ? 'salut ✓ mode appairage armé (accusé 5C reçu)' : 'salut sans accusé — on tente quand même');
     onButton && onButton();
+    await sleep(5000); // laisser le geste se faire AVANT l'o1 (fenêtre OOB)
     const init = c.buildPairInit(dst);
-    c.random.set(init.slice(7, 23)); // notre secret, retenu pour la clé de session
+    c.random.set(init.slice(7, 23)); // notre secret pour la clé de session
+    await t.send(await nbSeal0(key0, init)); // UNE SEULE FOIS
     let acc = false, asked = false;
     const t1 = Date.now();
-    while (Date.now() - t1 < 60000 && !acc && !t.lost) {
-      await t.send(await nbSeal0(key0, init));
-      const t2 = Date.now();
-      while (Date.now() - t2 < 2000 && !acc && !t.lost) {
-        const f = await t.recv(80); if (!f) continue;
-        if (f[f.length - 2] === 0 && f[f.length - 1] === 0) { // format compteur 0 (celui de l'appairage)
-          const r = await nbOpen0(key0, f);
-          if (!r.ok || r.pt[5] !== 0x5C) continue;
-          if (r.pt[6] === 1) acc = true;
-          else if (!asked) { asked = true; log('⏺ 5C 00 reçu : BASCULE LE PHARE maintenant (et toutes les ~5 s si rien ne bouge)…'); }
-        } else { // format SN — possible après acceptation
-          const d = await nbParse(c, f);
-          if (d && d.cmd === 0x5C) { if (d.arg === 1) acc = true; else if (!asked) { asked = true; log('⏺ BASCULE LE PHARE…'); } }
-        }
+    while (Date.now() - t1 < 45000 && !acc && !t.lost) {
+      const f = await t.recv(100); if (!f) continue;
+      let cmd = -1, arg = -1;
+      if (f[f.length - 2] === 0 && f[f.length - 1] === 0) { // format compteur 0 (celui de l'appairage)
+        const r = await nbOpen0(key0, f);
+        if (r.ok) { cmd = r.pt[5]; arg = r.pt[6]; }
+      } else { // format SN — possible une fois la session basculée
+        const d = await nbParse(c, f);
+        if (d) { cmd = d.cmd; arg = d.arg; }
       }
+      if (cmd !== 0x5C) continue;
+      if (arg === 1) acc = true;
+      else if (!asked && oob !== 'none') { asked = true; log('⏺ 5C 00 : la trottinette attend — BASCULE LE PHARE maintenant, puis toutes les ~5 s…'); }
+      else if (!asked) { asked = true; log('⏺ 5C 00 reçu — ne touche à rien, on attend la validation…'); }
     }
-    if (!acc) throw new Error('pas de 5C 01 en 60 s (phare basculé pendant la boucle ? SHU/appli Segway fermées ?)');
+    if (!acc) throw new Error(oob === 'none' ? 'pas de 5C 01 (le phare était-il allumé au départ ?)' : 'pas de 5C 01 en 45 s (phare basculé pendant la fenêtre ?)');
     log('étape 2 ✓ secret accepté (5C 01)');
-    await c.setRandomAppData(c.random); // clé de session = SHA1(secret‖jeton)
-    for (let a = 0; a < 4 && !c.O && !t.lost; a++) { // étape 3 : renvoi de la série (toléré)
-      await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge));
-      for (let i = 0; i < 15 && !c.O; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
-      if (!c.O) await sleep(300);
+    // jeton : obtenu par l'étape 1, tentée APRÈS l'appairage au format compteur 0
+    const s1 = c.buildGetRandom(dst);
+    for (let a = 0; a < 3 && !c.L && !t.lost; a++) {
+      await t.send(await nbSeal0(key0, s1));
+      const ta = Date.now();
+      while (Date.now() - ta < 2000 && !c.L) {
+        const f = await t.recv(80); if (!f) continue;
+        if (f[f.length - 2] === 0 && f[f.length - 1] === 0) {
+          const r = await nbOpen0(key0, f);
+          if (r.ok && r.pt.length >= 37 && r.pt[2] === 0x1E && r.pt[4] === 0x3E && r.pt[5] === 0x5B) {
+            c.token.set(r.pt.slice(7, 23)); c.challenge.set(r.pt.slice(23, 37)); c.L = true;
+            log('étape 1 (post-appairage) ✓ jeton reçu · série « ' + hexAscii(toHex(c.challenge)) + ' »');
+          }
+        } else await nbParse(c, f);
+      }
+      if (!c.L) await sleep(400);
     }
-    log(c.O ? 'étape 3 ✓ appariement complet' : 'étape 3 sans réponse — la lecture dira');
+    if (c.L) { await c.setRandomAppData(c.random); c.counter = 1; c.M = true; } // clé de session = SHA1(secret‖jeton)
+    else log('pas de jeton en direct — la reconnexion en mode reprise s’en chargera');
   }
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
@@ -929,14 +941,18 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
-    const variants = [{}, { key0: true }, { dst: 0x21 }, { key0: true, dst: 0x21 }]; // clé nom‖jeton ou initiale × destinataire 0x04/0x21
+    const variants = [{ oob: 'none' }, { oob: 'toggle' }, { dst: 0x21, oob: 'toggle' }]; // 1re hypothèse (Billel) : phare déjà allumé, ne rien toucher — comme avec l'appli Segway
     let ok = false;
     for (let essai = 1; essai <= variants.length && !ok; essai++) {
       if (essai > 1) { log(`\n— variante ${essai}/${variants.length} sur une connexion fraîche —`); await sleep(1500); }
+      const v = variants[essai - 1];
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ PENDANT LA PROCHAINE MINUTE : bascule le PHARE toutes les ~5 s (appui bref sur le bouton) jusqu’à ce que le journal affiche « secret accepté »…\n'), variants[essai - 1]);
+        const invite = v.oob === 'none'
+          ? '\n⏺ PHARE ALLUMÉ obligatoire : allume-le MAINTENANT s’il est éteint, puis n’y touche PLUS — test « phare allumé = appairage ouvert » (comme avec l’appli Segway). Fenêtre de 45 s…\n'
+          : '\n⏺ BASCULE LE PHARE toutes les ~5 s (appui bref sur le bouton) pendant la fenêtre de 45 s, jusqu’à ce que le journal affiche « secret accepté »…\n';
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), v);
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         let lu = 0; // lectures de confirmation
         for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
