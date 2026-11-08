@@ -734,18 +734,22 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
   const init = fixedRandom ? c.buildPairInit(0x04, fixedRandom) : c.buildPairInit(0x04);
   c.random.set(init.slice(7, 23));
   const key0 = await nbKey(c.name, c.token); // clé courante nom‖jeton — celle des acks 5C 01 observés
-  log('étape 2 : enregistrement du secret (1 o1 cpt0 par connexion, même secret à chaque tentative)…');
+  log('étape 2 : enregistrement du secret (3 o1 cpt0 espacés, même secret)…');
   onButton && onButton();
-  let mFlag = false, asked = false;
-  await t.send(await nbSeal0(key0, init));
+  let mFlag = false, asked = false, envoyes = 0;
+  const envoi = async () => { await t.send(await nbSeal0(key0, init)); envoyes++; };
+  await envoi();
   const t1 = Date.now();
-  while (Date.now() - t1 < 20000 && !mFlag && !t.lost) {
+  let d2 = false, d3 = false;
+  while (Date.now() - t1 < 30000 && !mFlag && !t.lost) {
+    if (!d2 && Date.now() - t1 > 4000) { d2 = true; await envoi(); } // 2e et 3e envois à +4 s et +8 s (≤4 propositions par connexion)
+    if (!d3 && Date.now() - t1 > 8000) { d3 = true; await envoi(); }
     const f = await t.recv(60); if (!f) continue;
     let d = await nbParse(c, f);
     if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
     if (d && d.cmd === 0x5C) {
-      if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓'); onAccepted && onAccepted(toHex(c.random)); }
-      else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
+      if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓ (après ' + envoyes + ' envois)'); onAccepted && onAccepted(toHex(c.random)); }
+      else if (!asked) { asked = true; log('⏺ 5C 00 : la fenêtre est armée — ALLUME LE PHARE maintenant si ce n’est pas fait…'); }
     }
   }
   if (!mFlag) throw new Error('pas de 5C 01 sur cette connexion (le secret est inchangé, la tentative suivante le réutilise)');
