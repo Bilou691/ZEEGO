@@ -114,7 +114,7 @@ console.log('\n[8] session complète simulée (téléphone ↔ trottinette simul
   await phone.encrypt(phone.buildPairInit(0x04));
   ok(phone.random.some(x => x), 'notre secret capturé à l’envoi de la trame 0x5C');
   const acker = new NbCrypto(name);
-  acker.token.set(token); await acker.deriveKey(acker.name, token); acker.counter = phone.counter - 1;
+  acker.token.set(token); await acker.deriveKey(acker.name, token); acker.counter = phone.counter;
   await phone.decrypt(await acker.encrypt(Uint8Array.from([0x5A, 0xA5, 0x00, 0x04, 0x3E, 0x5C, 0x00])));
   ok(phone.M, 'drapeau M (ACK arg=0x00 accepté — pas seulement 0x01)');
   ok(eq(phone.key, sha1_16(phone.random, token)), 'clé de session = SHA-1(secret ‖ jeton)');
@@ -122,14 +122,14 @@ console.log('\n[8] session complète simulée (téléphone ↔ trottinette simul
   // étape 3 : renvoi de la série puis ACK 0x5D 01
   await nbWrap(phone, 0x04, 0x5D, 0x00, phone.challenge);
   const acker3 = new NbCrypto(name);
-  acker3.token.set(token); await acker3.setRandomAppData(phone.random.slice()); acker3.counter = phone.counter - 1;
+  acker3.token.set(token); await acker3.setRandomAppData(phone.random.slice()); acker3.counter = phone.counter;
   await phone.decrypt(await acker3.encrypt(Uint8Array.from([0x5A, 0xA5, 0x00, 0x04, 0x3E, 0x5D, 0x01])));
   ok(phone.O && phone.M, 'drapeau O (appariement complet)');
 
   // lecture : requête registre 0x55, réponse 0x04 de la VCU (87 %)
   await nbWrap(phone, 0x16, 0x01, 0x55, Uint8Array.from([2]));
   const vcu = new NbCrypto(name);
-  vcu.token.set(token); await vcu.setRandomAppData(phone.random.slice()); vcu.counter = phone.counter - 1;
+  vcu.token.set(token); await vcu.setRandomAppData(phone.random.slice()); vcu.counter = phone.counter;
   const ans = await vcu.encrypt(Uint8Array.from([0x5A, 0xA5, 0x02, 0x16, 0x3E, 0x04, 0x55, 0x57, 0x00]));
   const d = await nbParse(phone, ans);
   ok(d && d.cmd === 0x04 && d.arg === 0x55 && d.src === 0x16, 'réponse 0x04/0x55 depuis 0x16 reconnue');

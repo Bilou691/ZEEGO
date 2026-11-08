@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.19';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.20';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -617,7 +617,7 @@ class NbCrypto {
       await this.deriveKey(this.random, this.token); this.M = true;
     }
     if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5D && out[6] === 1) { this.O = true; this.M = true; } // étape 3
-    this.counter = Math.max(this.counter, eff) + 1; // champ observé sur le fil SHU : 0 → 2 → 3, le compteur 1 n'existe jamais
+    this.counter = eff === 0 ? eff + 1 : eff; // fil SHU : cpt0 → compteur local +1 ; SN → numéro du fil (séquence dense 2,3,4…)
     return out;
   }
 }
@@ -711,8 +711,17 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
   }
   if (!c.L) throw new Error('étape 1 : pas de réponse (trottinette allumée ? appli Segway fermée ?)');
   log(`étape 1 ✓ jeton reçu · série « ${hexAscii(toHex(c.challenge))} »${c.pwdStored ? ' · un secret est déjà enregistré (INDEX=' + c.pwdStored + '), le nouveau le remplacera' : ''}`);
+  const etape3 = async () => { // écho de la série (0x5D) — SHU le fait toujours avant de lire, sans ça les lectures restent muettes
+    for (let a = 0; a < 4 && !c.O && !t.lost; a++) {
+      await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge));
+      for (let i = 0; i < 15 && !c.O; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
+      if (!c.O) await sleep(300);
+    }
+    log(c.O ? 'étape 3 ✓ appariement complet' : 'étape 3 sans réponse — les lectures diront');
+  };
   if (resume) { // étape 2 en reprise : on réinjecte le secret déjà enregistré, rien à envoyer
     await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
+    await etape3();
   } else {
     const dst = (variant && variant.dst) || 0x04;
     const oob = (variant && variant.oob) || 'toggle';
@@ -767,7 +776,8 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     if (!acc) throw new Error('pas de 5C 01 (dernier arg vu : ' + lastArg + ')');
     log('étape 2 ✓ secret accepté (5C 01)');
     await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton) — déjà adoptée par la trottinette, le compteur continue tout seul
-    if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera'); // (l'étape 1 a déjà tourné : NE PAS la refaire, elle ferait tourner le jeton)
+    if (c.L) await etape3(); // l'étape 1 a déjà tourné : le jeton est là, on complète l'appariement (NE PAS la refaire, elle ferait tourner le jeton)
+    else log('jeton absent — la reconnexion en mode reprise s’en chargera');
   }
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
