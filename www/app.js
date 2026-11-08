@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.33';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.34';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -555,8 +555,8 @@ class NbCrypto {
   async deriveKey(k1, k2) { this.key = await nbKey(k1, k2); }
   async setRandomAppData(d) { this.random.set(d); this.ready = this.deriveKey(this.random, this.token); await this.ready; } // reprise silencieuse, sans renvoyer 0x5C
   buildGetRandom(dst) { return Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, dst, 0x5B, 0x00]); } // étape 1
-  buildPairInit(dst) { // étape 2 : 16 octets aléatoires = notre secret
-    const f = new Uint8Array(23); f.set(Uint8Array.from([0x5A, 0xA5, 0x10, 0x3E, dst, 0x5C, 0x00])); f.set(crypto.getRandomValues(new Uint8Array(16)), 7); return f;
+  buildPairInit(dst, fixed) { // étape 2 : 16 octets aléatoires = notre secret (fixe si fourni — SHU garde le même à chaque renvoi)
+    const f = new Uint8Array(23); f.set(Uint8Array.from([0x5A, 0xA5, 0x10, 0x3E, dst, 0x5C, 0x00])); f.set(fixed || crypto.getRandomValues(new Uint8Array(16)), 7); return f;
   }
   invSum(body) { // somme de contrôle en octets SIGNÉS (Kotlin « j7 += b7 ») — piège classique
     let s = 0; for (let i = 0; i < body.length; i++) s += body[i] < 128 ? body[i] : body[i] - 256;
@@ -728,30 +728,27 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     c.counter = 0; await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : compteur à zéro + retour à l'état post-jeton (le 1er o1 du repli repart en cpt0)
     log('reprise non confirmée — efface le secret, passage en appairage complet (comme SHU)');
   }
-  // Adapté au firmware cpt0 de cette trottinette (les o1 SN sont rejetés, coupure après 5) :
-  // o1 cpt0 toutes les 500 ms avec un NOUVEAU secret à chaque envoi (octets identiques = rejet aussi).
-  log('étape 2 : enregistrement du secret (o1 cpt0 toutes les 500 ms, nouveau secret à chaque essai)…');
-  onButton && onButton();
-  let mFlag = false, asked = false, n = 0;
+  // SHU Q0() : le secret est généré UNE seule fois et le MÊME renvoyé à chaque tentative —
+  // sinon la trottinette accepte le secret n°2 et on en sauvegarde un autre (ambiguïté fatale à la reprise).
+  // Un seul o1 par connexion : le firmware coupe après ~5 propositions, et le nouveau jeton rend les trames différentes.
+  const init = fixedRandom ? c.buildPairInit(0x04, fixedRandom) : c.buildPairInit(0x04);
+  c.random.set(init.slice(7, 23));
   const key0 = await nbKey(c.name, c.token); // clé courante nom‖jeton — celle des acks 5C 01 observés
+  log('étape 2 : enregistrement du secret (1 o1 cpt0 par connexion, même secret à chaque tentative)…');
+  onButton && onButton();
+  let mFlag = false, asked = false;
+  await t.send(await nbSeal0(key0, init));
   const t1 = Date.now();
-  while (Date.now() - t1 < 90000 && !mFlag && !t.lost) {
-    const init = c.buildPairInit(0x04);
-    c.random.set(init.slice(7, 23)); // le dernier secret envoyé devient le secret de session
-    await t.send(await nbSeal0(key0, init));
-    n++;
-    const t2 = Date.now();
-    while (Date.now() - t2 < 500 && !mFlag && !t.lost) {
-      const f = await t.recv(60); if (!f) continue;
-      let d = await nbParse(c, f);
-      if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
-      if (d && d.cmd === 0x5C) {
-        if (d.arg === 1) { mFlag = true; log(`← 5C 01 : secret ACCEPTÉ ✓ (après ${n} envois)`); onAccepted && onAccepted(toHex(c.random)); }
-        else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
-      }
+  while (Date.now() - t1 < 20000 && !mFlag && !t.lost) {
+    const f = await t.recv(60); if (!f) continue;
+    let d = await nbParse(c, f);
+    if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
+    if (d && d.cmd === 0x5C) {
+      if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓'); onAccepted && onAccepted(toHex(c.random)); }
+      else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
     }
   }
-  if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare basculé en rythme pendant la fenêtre ? SHU/appli Segway fermées ?)');
+  if (!mFlag) throw new Error('pas de 5C 01 sur cette connexion (le secret est inchangé, la tentative suivante le réutilise)');
   await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
   // 0x5D : essais dans les 4 combinaisons format × clé (SN-session seul avait été testé, jamais avec un 5C 01 valide !)
   const keyPreD = await nbKey(c.name, c.token); // clé courante nom‖jeton
@@ -995,14 +992,15 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
+    const fixedRandom = crypto.getRandomValues(new Uint8Array(16)); // UN seul secret pour toute l'association (comme SHU)
     let ok = false;
-    for (let essai = 1; essai <= 3 && !ok; essai++) { // jusqu'à 3 connexions fraîches — la boucle o1 est dedans (SHU Q0)
-      if (essai > 1) { log(`\n— tentative ${essai}/3 sur une connexion fraîche —`); await sleep(1500); }
+    for (let essai = 1; essai <= 4 && !ok; essai++) { // jusqu'à 4 connexions fraîches — 1 seul o1 par connexion (limite firmware ~5)
+      if (essai > 1) { log(`\n— tentative ${essai}/4 sur une connexion fraîche (même secret) —`); await sleep(1500); }
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        const invite = '\n⏺ RÈGLE D’OR PENDANT LES 90 s : le phare doit rester ALLUMÉ en permanence — allume-le maintenant s’il est éteint, et NE L’ÉTEINS SURTOUT PAS : chaque extinction peut annuler l’appairage (la liaison coupe exactement là)…\n';
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) })); // le secret est sauvé DÈS le 5C 01 (un crash ne doit pas le perdre)
+        const invite = '\n⏺ BASCULE LE PHARE toutes les ~2 s (appui bref) pendant les ~20 s de chaque tentative, jusqu’à « ACCEPTÉ »…\n';
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) }), fixedRandom); // le secret est sauvé DÈS le 5C 01
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
         // comme SHU : on déconnecte, on souffle, et on reprend en mode reprise (le chemin éprouvé).
