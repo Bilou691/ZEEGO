@@ -999,7 +999,7 @@ async function blePair() {
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        const invite = '\n⏺ BASCULE LE PHARE toutes les ~2 s (appui bref) pendant les ~20 s de chaque tentative, jusqu’à « ACCEPTÉ »…\n';
+        const invite = '\n⏺ IMPORTANT : phare ÉTEINT au départ (éteins-le entre les tentatives) — À l’⏽ : UN appui pour l’ALLUMER puis laisse-le allumé : c’est l’allumage qui ouvre la fenêtre’à « ACCEPTÉ »…\n';
         await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) }), fixedRandom); // le secret est sauvé DÈS le 5C 01
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
