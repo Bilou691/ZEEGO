@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.34';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.35';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -693,7 +693,7 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
 // ---------- Poignée de main en 3 étapes (flot SHU, cf. pepperonas/zt3_cli/handshake.py) ----------
 // PORTÉE VOLONTAIREMENT LIMITÉE : session établie pour LIRE (batterie, kilométrage…).
 // Aucune commande de conduite (ni verrouillage, ni réglages, ni firmware).
-async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
+async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fixedRandom) {
   if (variant && variant.hello) { // réplique du 1er fil réel SHU (Phase B/E2) : salut 0x5C VIDE, sans 0x5B préalable
     const h = Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, variant.dst || 0x04, 0x5C, 0x00]);
     for (let a = 0; a < 6 && !c.L; a++) {
