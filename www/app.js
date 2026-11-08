@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.21';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.22';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -912,11 +912,12 @@ function scPanelWire(m) {
   if (pair) { pair.onclick = () => blePair(); return; }
   sc.panel = m;
   if (sc.state === 'live') sc.startLoop();
-  sc.renderHook = () => { // rafraîchit le panneau tant qu'il est ouvert
-    if (!document.body.contains(m) || m.hidden) { sc.panel = null; sc.renderHook = null; return; }
-    m.querySelector('#scGrid').innerHTML = ZT3_REGS.map(scCell).join('');
+  sc.renderHook = () => { // rafraîchit le panneau tant qu'il est ouvert (s'il a été remplacé par un autre modal : on se débranche)
+    const g = m.querySelector('#scGrid');
+    if (!document.body.contains(m) || m.hidden || !g) { sc.panel = null; sc.renderHook = null; return; }
+    g.innerHTML = ZT3_REGS.map(scCell).join('');
     const ago = sc.data && sc.data.t ? ' · vu ' + new Date(sc.data.t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '';
-    m.querySelector('#scState').textContent = scStateLabel() + ago;
+    const st = m.querySelector('#scState'); if (st) st.textContent = scStateLabel() + ago;
     const pre = m.querySelector('#scLogPre'); if (pre) pre.textContent = sc.log.join('\n') || '—';
   };
   m.querySelector('#scGo').onclick = async e => {
@@ -965,14 +966,19 @@ async function blePair() {
         try { await t.close(); } catch {} t = null;
         await sleep(3000);
         let lu = 0;
-        if (await sc.connect(true, l => log('  ' + l))) {
-          await sleep(1200); await sc.poll();
-          if (sc.data && (sc.data.battery || sc.data.odometer)) {
-            lu = 1;
-            log('Batterie : ' + sc.data.battery.v + ' · Km total : ' + sc.data.odometer.v);
+        for (const pause of [0, 4000]) { // la trottinette a parfois besoin de souffler après un appairage : 2 tentatives
+          if (pause) { log('nouvelle tentative de reprise dans 4 s…'); await sleep(pause); }
+          if (await sc.connect(true, l => log('  ' + l))) {
+            await sleep(1200); await sc.poll();
+            if (sc.data && (sc.data.battery || sc.data.odometer)) {
+              lu = 1;
+              log('Batterie : ' + (sc.data.battery || sc.data.odometer).v + (sc.data.battery && sc.data.odometer ? ' · Km total : ' + sc.data.odometer.v : ''));
+            }
+            if (lu) break;
           }
+          await sc.stop();
         }
-        if (!lu) throw new Error('la reprise n’a pas abouti — vois les lignes « reprise » ci-dessus');
+        if (!lu) throw new Error('la reprise n’a pas abouti — vois les lignes « reprise » ci-dessus (ou tape « Connecter » dans le panneau plus tard)');
         log('\nSession confirmée ✓ Trotti est associée à ta trottinette.');
         if (t) { // session directe : on la transfère au moteur
           await sc.stop(); sc.t = t; sc.c = c; sc.state = 'live'; sc.data = sc.data || {}; sc.startLoop(); sc.poll(); sc.render();
