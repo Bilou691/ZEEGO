@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.26';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.27';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -617,7 +617,7 @@ class NbCrypto {
       await this.deriveKey(this.random, this.token); this.M = true;
     }
     if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5D && out[6] === 1) { this.O = true; this.M = true; } // étape 3
-    this.counter = eff === 0 ? eff + 1 : eff; // fil SHU : cpt0 → compteur local +1 ; SN → numéro du fil (séquence dense 2,3,4…)
+    this.counter = this.counter + 1; // SHU h() authentique : simple incrément — JAMAIS de saut vers le compteur du fil (le recul provoquait des rejeus)
     return out;
   }
 }
@@ -725,7 +725,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
     await etape3(6);
     if (c.O) return true;
-    await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : retour à l'état post-jeton
+    c.counter = 0; await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : compteur à zéro + retour à l'état post-jeton (le 1er o1 du repli repart en cpt0)
     log('reprise non confirmée — efface le secret, passage en appairage complet (comme SHU)');
   }
   // SHU Q0() : o1 renvoyé TOUTES LES 500 ms avec le MÊME secret jusqu'au 5C 01 —
