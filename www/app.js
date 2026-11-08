@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.22';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.23';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -671,17 +671,19 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
   });
   await BLE.startNotifications({ deviceId: id, service: NUS.svc, characteristic: NUS.rx });
   await sleep(200); // laisser l'abonnement notifications bien prendre avant l'étape 1 (cf. référence)
-  t.send = async wire => {
+  t.send = async (wire, lg) => {
+    const L = lg || log;
     t.lastTx = toHex(wire);
-    if (wire.length > t.chunk) log && log(`⚠ trame de ${wire.length} octets : fragmentée en ${Math.ceil(wire.length / t.chunk)} écritures`);
-    log && log('→ ' + toHex(wire));
+    if (wire.length > t.chunk) L && L(`⚠ trame de ${wire.length} octets : fragmentée en ${Math.ceil(wire.length / t.chunk)} écritures`);
+    L && L('→ ' + toHex(wire));
     for (let o = 0; o < wire.length; o += t.chunk) {
       await BLE.write({ deviceId: id, service: NUS.svc, characteristic: NUS.tx, value: toHex(wire.slice(o, o + t.chunk)), timeout: 5000 });
     }
   };
-  t.recv = async ms => { // prochaine trame reçue, ou null après ms
+  t.recv = async (ms, lg) => { // prochaine trame reçue, ou null après ms
+    const L = lg || log;
     const t0 = Date.now();
-    while (Date.now() - t0 < ms) { if (t.q.length) { const f = t.q.shift(); log && log('← ' + toHex(f)); return f; } await sleep(15); }
+    while (Date.now() - t0 < ms) { if (t.q.length) { const f = t.q.shift(); L && L('← ' + toHex(f)); return f; } await sleep(15); }
     return null;
   };
   t.close = async () => { try { await t.hDisc.remove(); } catch {} try { await t.handle.remove(); } catch {} try { await BLE.disconnect({ deviceId: id }); } catch {} };
@@ -802,12 +804,12 @@ const ZT3_REGS = [
   { d: 0x07, r: 0x8E, n: 2, k: 'health', lab: 'Santé batt.', dec: p => p[0] + ' %' },
   { d: 0x07, r: 0x96, n: 4, k: 'tempBms', lab: 'Temp. batt.', dec: p => p[0] + ' °C' }
 ];
-async function nbReadReg(t, c, dst, reg, n) { // lecture cmd 0x01 → réponse cmd 0x04 (≈600 ms de patience)
+async function nbReadReg(t, c, dst, reg, n, lg) { // lecture cmd 0x01 → réponse cmd 0x04 (≈600 ms de patience)
   if (t.lost) return null;
-  await t.send(await nbWrap(c, dst, 0x01, reg, Uint8Array.from([n])));
+  await t.send(await nbWrap(c, dst, 0x01, reg, Uint8Array.from([n])), lg);
   const t0 = Date.now();
   while (Date.now() - t0 < 600) {
-    const f = await t.recv(50); if (!f) continue;
+    const f = await t.recv(50, lg); if (!f) continue;
     const d = await nbParse(c, f);
     if (d && d.cmd === 0x04 && d.arg === reg && d.src === dst) return d.payload;
   }
@@ -846,7 +848,7 @@ const sc = {
       say('reprise : connexion…');
       await nbHandshake(t, c, rec.random || rec.password, say); // « password » = anciens enregistrements
       store.set('scooter', { ...rec, random: toHex(c.random) });
-      this.t = t; this.c = c; this.state = 'live'; say('connectée ✓'); this.render();
+      this.t = t; this.c = c; this.state = 'live'; this.swept = false; say('connectée ✓'); this.render();
       this.startLoop(); this.poll();
       return true;
     } catch (e) {
@@ -858,10 +860,23 @@ const sc = {
       return false;
     }
   },
+  async sweep() { // diagnostic : même registre sur toutes les cartes + registres classiques — dit si QUELQUE CHOSE répond
+    const tries = [[0x16, 0x55, 2], [0x16, 0x57, 2], [0x02, 0x86, 2], [0x07, 0x8F, 2], [0x04, 0x55, 2], [0x16, 0xB5, 2], [0x16, 0x26, 2], [0x16, 0xB7, 4], [0x09, 0x55, 2], [0x01, 0x55, 2]];
+    const say = m => this.say(m);
+    let ok = 0;
+    for (const [d, r, n] of tries) {
+      const p = await nbReadReg(this.t, this.c, d, r, n, say);
+      if (p) { ok++; say(`✓ carte 0x${d.toString(16).padStart(2, '0')} reg 0x${r.toString(16).padStart(2, '0')} → ${(toHex(p).match(/../g) || []).join(' ')}`); }
+      await sleep(80);
+    }
+    say(ok ? `balayage : ${ok}/${tries.length} ont répondu ✓` : 'balayage : AUCUNE carte n’a répondu — la clé de session ne correspond pas côté trottinette');
+    return ok;
+  },
   async poll(fast) { // fast = batterie + vitesse seulement
     if (this.state !== 'live' || !this.t || this.busy) return;
     this.busy = true;
     try {
+      if (!this.swept) { this.swept = true; await this.sweep(); if (this.state !== 'live') return; }
       const regs = fast ? ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'speed') : ZT3_REGS;
       let got = 0;
       for (const r of regs) {
@@ -888,7 +903,7 @@ const sc = {
     }, 500);
   },
   stopLoop() { if (this.timer) { clearInterval(this.timer); this.timer = null; } },
-  async stop() { this.stopLoop(); if (this.t) { try { await this.t.close(); } catch {} this.t = null; } },
+  async stop() { this.stopLoop(); this.state = 'off'; if (this.t) { try { await this.t.close(); } catch {} this.t = null; } },
   async forget() { await this.stop(); this.state = 'off'; this.data = null; store.del('scooter'); store.del('scooterData'); this.render(); }
 };
 
