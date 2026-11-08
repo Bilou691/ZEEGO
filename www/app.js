@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.30';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.31';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -728,31 +728,32 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     c.counter = 0; await c.deriveKey(c.name, c.token); c.M = false; // c6.c.j() : compteur à zéro + retour à l'état post-jeton (le 1er o1 du repli repart en cpt0)
     log('reprise non confirmée — efface le secret, passage en appairage complet (comme SHU)');
   }
-  // SHU Q0() : o1 renvoyé TOUTES LES 500 ms avec le MÊME secret jusqu'au 5C 01 —
-  // chaque o1 arme une fenêtre d'acceptation de ~500 ms : la bascule du phare doit tomber dedans.
-  const init = c.buildPairInit(0x04);
-  c.random.set(init.slice(7, 23)); // notre secret, généré UNE seule fois (comme SHU)
-  const key0 = await nbKey(c.name, c.token); // clé courante nom‖jeton — celle des 5C 01 observés sur le fil
-  log('étape 2 : enregistrement du secret (o1 toutes les 500 ms jusqu’à acceptation)…');
+  // Adapté au firmware cpt0 de cette trottinette (les o1 SN sont rejetés, coupure après 5) :
+  // o1 cpt0 toutes les 500 ms avec un NOUVEAU secret à chaque envoi (octets identiques = rejet aussi).
+  log('étape 2 : enregistrement du secret (o1 cpt0 toutes les 500 ms, nouveau secret à chaque essai)…');
   onButton && onButton();
-  let mFlag = false, asked = false;
+  let mFlag = false, asked = false, n = 0;
+  const key0 = await nbKey(c.name, c.token); // clé courante nom‖jeton — celle des acks 5C 01 observés
   const t1 = Date.now();
   while (Date.now() - t1 < 90000 && !mFlag && !t.lost) {
-    await t.send(await c.encrypt(init)); // SHU : chaque renvoi passe dans encrypt() → compteur croissant (octets identiques = rejeu → coupure)
+    const init = c.buildPairInit(0x04);
+    c.random.set(init.slice(7, 23)); // le dernier secret envoyé devient le secret de session
+    await t.send(await nbSeal0(key0, init));
+    n++;
     const t2 = Date.now();
     while (Date.now() - t2 < 500 && !mFlag && !t.lost) {
       const f = await t.recv(60); if (!f) continue;
       let d = await nbParse(c, f);
       if (!d) { const r = await nbOpen0(key0, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
       if (d && d.cmd === 0x5C) {
-        if (d.arg === 1) { mFlag = true; log('← 5C 01 : secret ACCEPTÉ ✓'); }
-        else if (!asked) { asked = true; log('⏺ 5C 00 : la trottinette attend — vérifie que le PHARE est bien ALLUMÉ et LAISSE-LE allumé…'); }
+        if (d.arg === 1) { mFlag = true; log(`← 5C 01 : secret ACCEPTÉ ✓ (après ${n} envois)`); }
+        else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
       }
     }
   }
-  if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare resté allumé sans extinction pendant la fenêtre ? SHU/appli Segway fermées ?)');
+  if (!mFlag) throw new Error('pas de 5C 01 en 90 s (phare basculé en rythme pendant la fenêtre ? SHU/appli Segway fermées ?)');
   await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
-  await etape3(24); // SHU : D0 toutes les 500 ms jusqu'au 5D 01
+  await etape3(24); // SHU : D0 toutes les 500 ms jusqu’au 5D 01
   if (!c.O) log('étape 3 non confirmée — les lectures tentent, puis la reprise confirmera');
   if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera');
   else {
