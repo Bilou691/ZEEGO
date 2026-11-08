@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.14';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.15';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -678,6 +678,16 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
 // PORTÉE VOLONTAIREMENT LIMITÉE : session établie pour LIRE (batterie, kilométrage…).
 // Aucune commande de conduite (ni verrouillage, ni réglages, ni firmware).
 async function nbHandshake(t, c, resume, log, onButton, variant) {
+  if (variant && variant.hello) { // réplique du 1er fil réel SHU (Phase B/E2) : salut 0x5C VIDE, sans 0x5B préalable
+    const h = Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, variant.dst || 0x04, 0x5C, 0x00]);
+    for (let a = 0; a < 6 && !c.L; a++) {
+      log(`salut 0x5C vide · essai ${a + 1} (compteur ${c.counter})`);
+      await t.send(await c.encrypt(h));
+      for (let i = 0; i < 15 && !c.L; i++) { const f = await t.recv(40); if (f) await nbParse(c, f); }
+      if (!c.L) await sleep(300);
+    }
+    if (!c.L) throw new Error('salut sans réponse');
+  }
   const s1 = c.buildGetRandom(0x04);
   for (let a = 0; a < 6 && !c.L; a++) { // étape 1 : la trottinette répond jeton + série (jusqu'à 6 essais)
     log(`étape 1 · essai ${a + 1} (compteur ${c.counter})`);
@@ -880,7 +890,7 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
-    const variants = [{}, { ctr: 2 }, { dst: 0x21 }, { ctr: 2, dst: 0x21 }]; // compteur auto (3) ou 2 · destinataire 0x04 ou 0x21
+    const variants = [{}, { ctr: 2 }, { dst: 0x21 }, { ctr: 2, dst: 0x21 }, { hello: true }]; // + salut 0x5C vide en 1re trame (fil réel SHU)
     let ok = false;
     for (let essai = 1; essai <= variants.length && !ok; essai++) { // jusqu'à 4 connexions fraîches
       if (essai > 1) { log(`\n— nouvelle tentative ${essai}/${variants.length} sur une connexion fraîche —`); await sleep(1500); }
