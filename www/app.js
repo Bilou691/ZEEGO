@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.23';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.24';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -777,9 +777,29 @@ async function nbHandshake(t, c, resume, log, onButton, variant) {
     }
     if (!acc) throw new Error('pas de 5C 01 (dernier arg vu : ' + lastArg + ')');
     log('étape 2 ✓ secret accepté (5C 01)');
-    await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton) — déjà adoptée par la trottinette, le compteur continue tout seul
-    if (c.L) await etape3(); // l'étape 1 a déjà tourné : le jeton est là, on complète l'appariement (NE PAS la refaire, elle ferait tourner le jeton)
-    else log('jeton absent — la reconnexion en mode reprise s’en chargera');
+    await c.setRandomAppData(c.random); c.M = true; // clé de session SHA1(secret‖jeton)
+    if (!c.L) log('jeton absent — la reconnexion en mode reprise s’en chargera');
+    else {
+      // EXPÉRIENCE : à quel moment la trottinette bascule-t-elle sur la clé de session ?
+      // On essaye 0x5D puis une lecture, chacun sous les DEUX clés, tout est journalisé.
+      const keyPre = await nbKey(c.name, c.token); // clé courante — celle sous laquelle le 5C 01 est arrivé
+      const alt = Object.create(c); alt.key = keyPre;
+      const ecout = async (lab, cc, dst, cmd, arg, data) => {
+        await t.send(await nbWrap(cc, dst, cmd, arg, data), l => log('  ' + l));
+        const t0 = Date.now(); let vu = null;
+        while (Date.now() - t0 < 900 && !vu) {
+          const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+          let d = await nbParse(c, f); if (!d) d = await nbParse(alt, f);
+          if (d) { vu = d; log(`  ← ${lab} : cmd=0x${d.cmd.toString(16)} arg=0x${d.arg.toString(16)} src=0x${d.src.toString(16)} [${(toHex(d.payload).match(/../g) || []).join(' ')}]`); }
+        }
+        return vu;
+      };
+      log('expérience 1 : 0x5D sous clé courante…'); await ecout('5D', alt, 0x04, 0x5D, 0x00, c.challenge);
+      log('expérience 2 : 0x5D sous clé de session…'); await ecout('5D', c, 0x04, 0x5D, 0x00, c.challenge);
+      log('expérience 3 : lecture batterie sous clé de session…'); const l3 = await ecout('lecture', c, 0x16, 0x01, 0x55, Uint8Array.from([2]));
+      if (!l3) { log('expérience 4 : lecture batterie sous clé courante…'); await ecout('lecture', alt, 0x16, 0x01, 0x55, Uint8Array.from([2])); }
+      log('fin des expériences — la reprise dira le reste');
+    }
   }
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
   return true;
