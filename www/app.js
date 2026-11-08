@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.13';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.14';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -617,7 +617,7 @@ class NbCrypto {
       await this.deriveKey(this.random, this.token); this.M = true;
     }
     if (eff > 0 && out.length >= 7 && out[4] === 0x3E && out[5] === 0x5D && out[6] === 1) { this.O = true; this.M = true; } // étape 3
-    this.counter = eff + 1;
+    this.counter = Math.max(this.counter, eff) + 1; // champ observé sur le fil SHU : 0 → 2 → 3, le compteur 1 n'existe jamais
     return out;
   }
 }
@@ -677,7 +677,7 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
 // ---------- Poignée de main en 3 étapes (flot SHU, cf. pepperonas/zt3_cli/handshake.py) ----------
 // PORTÉE VOLONTAIREMENT LIMITÉE : session établie pour LIRE (batterie, kilométrage…).
 // Aucune commande de conduite (ni verrouillage, ni réglages, ni firmware).
-async function nbHandshake(t, c, resume, log, onButton) {
+async function nbHandshake(t, c, resume, log, onButton, variant) {
   const s1 = c.buildGetRandom(0x04);
   for (let a = 0; a < 6 && !c.L; a++) { // étape 1 : la trottinette répond jeton + série (jusqu'à 6 essais)
     log(`étape 1 · essai ${a + 1} (compteur ${c.counter})`);
@@ -690,10 +690,12 @@ async function nbHandshake(t, c, resume, log, onButton) {
   if (resume) { // étape 2 en reprise : on réinjecte le secret déjà enregistré, rien à envoyer
     await c.setRandomAppData(fromHex(resume)); c.M = true; log('étape 2 ✓ reprise du secret enregistré');
   } else {
-    log('étape 2 : enregistrement du secret…');
+    const dst = variant && variant.dst || 0x04;
+    if (variant && variant.ctr) { c.counter = variant.ctr - 1; } // contre-essai explicite du compteur
+    log(`étape 2 : enregistrement du secret (compteur ${c.counter + 1}, destinataire 0x${dst.toString(16).padStart(2, '0')})…`);
     onButton && onButton();
     await sleep(5000); // laisser le temps de basculer le phare : l'o1 doit partir pendant la fenêtre d'acceptation
-    await t.send(await c.encrypt(c.buildPairInit(0x04))); // envoyé EXACTEMENT une fois (insister coupe la liaison)
+    await t.send(await c.encrypt(c.buildPairInit(dst))); // envoyé EXACTEMENT une fois (insister coupe la liaison)
     let forced = false;
     for (let i = 0; i < 300 && !c.M; i++) { // jusqu'à 15 s
       if (t.lost) throw new Error('la liaison a été coupée pendant l’étape 2');
@@ -878,13 +880,14 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
+    const variants = [{}, { ctr: 2 }, { dst: 0x21 }, { ctr: 2, dst: 0x21 }]; // compteur auto (3) ou 2 · destinataire 0x04 ou 0x21
     let ok = false;
-    for (let essai = 1; essai <= 3 && !ok; essai++) { // jusqu'à 3 connexions fraîches (la recovery documentée)
-      if (essai > 1) { log(`\n— nouvelle tentative ${essai}/3 sur une connexion fraîche —`); await sleep(1200); }
-      t = await nbConnect(id, h => log(h));
-      const c = new NbCrypto(name);
+    for (let essai = 1; essai <= variants.length && !ok; essai++) { // jusqu'à 4 connexions fraîches
+      if (essai > 1) { log(`\n— nouvelle tentative ${essai}/${variants.length} sur une connexion fraîche —`); await sleep(1500); }
       try {
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ APPUIE UNE FOIS, BRIÈVEMENT, sur le bouton d’allumage : le PHARE doit S’ALLUMER ou S’ÉTEINDRE — c’est ce basculement qui confirme l’appairage (geste officiel SHU). Si rien ne bouge, re-appuie encore une fois. L’enregistrement part dans 5 s…\n'));
+        t = await nbConnect(id, h => log(h));
+        const c = new NbCrypto(name);
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log('\n⏺ APPUIE UNE FOIS, BRIÈVEMENT, sur le bouton d’allumage : le PHARE doit S’ALLUMER ou S’ÉTEINDRE — c’est ce basculement qui confirme l’appairage (geste officiel SHU). Si rien ne bouge, re-appuie encore une fois. L’enregistrement part dans 5 s…\n'), variants[essai - 1]);
         let lu = 0; // lectures de confirmation : elles seules prouvent que le secret est accepté
         for (const r of ZT3_REGS.filter(r => r.k === 'battery' || r.k === 'odometer')) {
           const p = await nbReadReg(t, c, r.d, r.r, r.n);
@@ -902,8 +905,9 @@ async function blePair() {
       } catch (e) {
         const msg = e && (e.message || e.errorMessage) || String(e);
         log('\nÉchec : ' + msg);
+        if (/133/.test(msg)) log('(erreur 133 : éteins puis rallume la trottinette, puis relance l’association)');
         if (t) { try { await t.close(); } catch {} t = null; }
-        if (essai === 3) {
+        if (essai === variants.length) {
           log('Envoie-moi ce rapport (bouton Copier) pour que j’ajuste.');
           log('Plan B si ça bloque encore : un ancien secret est peut-être resté sur la trottinette (INDEX=1) — une réinitialisation d’usine depuis l’appli Segway officielle l’efface, puis relance l’association.');
         }
