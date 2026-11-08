@@ -2,6 +2,8 @@
 
 App Android (Capacitor) + serveur de signalements.
 
+> 🛴 **Trottinette Segway ZT3 Pro (Bluetooth)** : tout le reverse-engineering (protocole Ninebot « Encryption2 », appairage, lectures, règles prouvées, pistes) est documenté dans **[docs/DOSSIER-ZT3-BLE.md](docs/DOSSIER-ZT3-BLE.md)** — à lire en premier avant de toucher au bloc BLE de `www/app.js`.
+
 ```
 www/        l'app (HTML/JS/CSS) – c'est ce que l'APK embarque
   boot.js   chargeur + mise à jour automatique depuis GitHub
