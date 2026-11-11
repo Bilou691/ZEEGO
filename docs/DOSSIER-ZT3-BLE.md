@@ -100,7 +100,7 @@ Lire **batterie, kilométrage, vitesse** de la Segway-Ninebot **ZT3 Pro** dans l
 5. Récupérer le rapport (« Copier le rapport ») — chaque ligne `→`/`←` est de l'or : décoder offline avec les clés candidates (scripts Node dans l'historique de session).
 6. Une seule variable par version si possible ; le rapport de Billel fait foi.
 
-## 10. Rapport du 2026-11-11 (v1.4.41) — 4 échecs SILENCIEUX, un comportement nouveau
+## 10. Rapports du 2026-11-11 — v1.4.41 (silence total) puis v1.4.42 (acks illisibles)
 
 Rapport d'association de 08:35 (4 connexions fraîches, o1 cpt0 à secrets uniques ×4 par connexion) :
 
@@ -112,6 +112,13 @@ Rapport d'association de 08:35 (4 connexions fraîches, o1 cpt0 à secrets uniqu
   3. **INDEX=1 actif** = le secret d'une ACCEPTATION TROTTI PRÉCÉDENTE — tester « Connecter » dans le panneau (reprise avec le secret stocké dans `trotti.scooter`) pour voir si les lectures répondent.
 - **v1.4.42 en réponse** : jeton + secrets o1 en CLAIR dans le rapport (analyse hors-ligne sans nouvelle session), `nbTryDecode` (3 clés × f-XOR/SN × compteurs voisins) sur toute trame indéchiffrable pour casser les « …0002 » en direct, invitation réalignée sur la règle 4 (**bascules répétées 1-2 s**, pas un seul appui — le texte 1.4.36 contredisait le dossier), attente d'un appui sur « Trottinette prête (phare éteint) » entre les tentatives.
 - **Bifurcation suivante** : si SHU arrive à s'appairer à cette trottinette → `adb logcat -s ToothSErvice` pendant un appairage SHU réel (piste 5, le chemin le plus court vers la vérité) ; si SHU échoue aussi → réinitialisation d'usine (piste 6) comme variable contrôlée.
+
+### 10 bis. Rapport v1.4.42 (08:53) + cassage hors ligne : les acks « …0002 » ne cèdent PAS — on les CONTOURNE
+
+- **La v1.4.42 a fait réapparaître les acks** : bascules du phare en rythme → 1 ack `5aa500…0002` (13 octets, corps 4 o, queue ctr=0002) **après l'o1 #3, dans les 4 tentatives**. Le silence de la v1.4.41 était donc bien un état (phare), pas une régression.
+- **Cassage hors ligne avec données APPARIÉES** (première fois : jeton + secrets de la MÊME session en clair dans le rapport, `tools/decode-mystery.mjs`) : 11 clés (courante, initiale, session o1#1-4, reprise o1#1-4‖zéros, sel‖jeton) × compteurs 1-10 × formats CTR/f-XOR + vérification du tag → **RIEN**. Conclusion : la clé de ces acks fait intervenir une donnée qu'on n'a pas — très probablement le **secret INDEX=1 stocké côté trottinette** (une de nos anciennes acceptations). On arrête d'essayer de les déchiffrer.
+- **Trois bugs v1.4.42 trouvés en analysant pourquoi nbTryDecode n'a rien loggé** : (1) une trame au cmd garbage « parse » structurellement → jetée en silence sans forçage ; (2) nbTryDecode rejetait les trames < 15 octets or ces acks en font 13 ; (3) motif de cmd décalé d'un octet (`out[i+2]` au lieu de `out[i+1]`). Tous corrigés en v1.4.43.
+- **Stratégie v1.4.43 — les lectures sont le juge de paix** : ack illisible reçu → on ne jette PLUS la connexion ; on lance quand même la dissection (lecture batterie sous la clé de session de CHAQUE secret envoyé + courante + initiale, formats SN et cpt0). Si l'ack était un 5C 01 chiffré sous le secret retenu, **une lecture répondra** → secret identifié + sauvegardé + session établie, sans jamais lire l'ack. Si rien ne répond (ni lecture ni 5D) → échec honnête, la fenêtre ne s'est pas ouverte.
 
 ---
 

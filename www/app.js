@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.42';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.43';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -662,17 +662,20 @@ async function nbOpen0(key, wire) { // déchiffre une trame format compteur 0 et
 }
 // ---- [nb-crypto] fin du bloc pur ----
 
-// Forçage de lecture : la trottinette répond parfois par des trames qu'on ne sait pas déchiffrer
-// (« …0002 » — probablement des 5C 00). On essaie les 3 clés candidates × (f-XOR + compteurs SN
-// voisins de celui de la queue), et on journalise la combinaison qui ouvre la trame.
-async function nbTryDecode(c, wire, log) {
-  if (!wire || wire.length < 15 || wire[0] !== 0x5A || wire[1] !== 0xA5) return;
+// Forçage de lecture : la trottinette répond par des acks « …0002 » qu'on ne sait PAS déchiffrer
+// (prouvé le 2026-11-11 : même jeton+secrets appariés, 11 clés × compteurs 1-10 × 2 formats → rien,
+// cf. tools/decode-mystery.mjs — la clé fait intervenir le secret INDEX=1 stocké côté trottinette).
+// On tente quand même : clés de session de CHAQUE secret envoyé + courante + initiale × (f-XOR + compteurs voisins).
+async function nbTryDecode(c, wire, log, secretsHex) {
+  if (!wire || wire.length < 9 || wire[0] !== 0x5A || wire[1] !== 0xA5) return;
   const ctrIn = (wire[wire.length - 2] << 8) | wire[wire.length - 1];
   const body = wire.slice(3, wire.length - 6);
-  const cles = [['courante', c.key], ['session', await nbKey(c.random, c.token)], ['initiale', await nbKey(c.name, NB_FW)]];
-  const cherche = out => {
-    for (let i = 0; i + 4 <= out.length; i++)
-      if (out[i] === 0x3E && [0x5B, 0x5C, 0x5D].includes(out[i + 2])) return { cmd: out[i + 2], arg: out[i + 3] };
+  const cles = [];
+  for (let i = 0; i < (secretsHex || []).length; i++) cles.push(['session o1#' + (i + 1), await nbKey(fromHex(secretsHex[i]), c.token)]);
+  cles.push(['courante', c.key], ['initiale', await nbKey(c.name, NB_FW)]);
+  const cherche = out => { // motif d'un ack : [src, 0x3E, cmd, arg] — cmd juste APRÈS le 0x3E (bug d'offset corrigé)
+    for (let i = 0; i + 3 <= out.length; i++)
+      if (out[i] === 0x3E && [0x5B, 0x5C, 0x5D].includes(out[i + 1])) return { cmd: out[i + 1], arg: out[i + 2] };
     return null;
   };
   for (const [nom, cle] of cles) {
@@ -793,7 +796,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
   // puis DISSECTION de la clé de session : quel secret la trottinette a-t-elle retenu ?
   log('étape 2 : enregistrement du secret (4 o1 cpt0, un secret différent chacun)…');
   onButton && onButton();
-  let mFlag = false, asked = false;
+  let mFlag = false, asked = false, ackIllisible = 0;
   const envoyes = []; // les secrets envoyés (hex), dans l'ordre — on testera lequel a été retenu
   const envoi = async () => {
     const init = c.buildPairInit(0x04);
@@ -815,11 +818,20 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     if (d && d.cmd === 0x5C) {
       if (d.arg === 1) { mFlag = true; log(`← 5C 01 : ACCEPTÉ ✓ (après ${envoyes.length} envois)`); }
       else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 1-2 s) jusqu’à « ACCEPTÉ »…'); }
-    } else if (!d) await nbTryDecode(c, f, log); // trame non lisible (les mystérieuses « …0002 ») : forçage multi-clés
+    } else if (!d || ![0x5B, 0x5C, 0x5D, 0x04, 0x01].includes(d.cmd)) {
+      // ack illisible (les « …0002 ») : une trame au cmd inconnu « parse » quand même structurellement —
+      // elle était jetée en silence avant. On la force sous toutes les clés, et SURTOUT on la compte :
+      ackIllisible++;
+      await nbTryDecode(c, f, log, envoyes);
+    }
   }
   if (!mFlag) { // jeton + secrets en clair dans le rapport : l'analyse hors-ligne ne dépend plus d'une nouvelle session
     log('jeton : ' + toHex(c.token) + ' · secrets proposés : ' + envoyes.join(' '));
-    throw new Error('pas de 5C 01 sur cette connexion');
+    if (!ackIllisible) throw new Error('pas de 5C 01 sur cette connexion');
+    // L'ack « …0002 » est indéchiffrable (clé inconnue — probablement le secret INDEX=1), MAIS s'il s'agit
+    // d'un 5C 01 chiffré sous le secret retenu, une LECTURE sous ce secret répondra. La dissection qui suit
+    // est notre juge de paix : lectures sous chaque secret envoyé → si l'une répond, la session est établie.
+    log('⏺ ' + ackIllisible + ' ack' + (ackIllisible > 1 ? 's' : '') + ' illisible' + (ackIllisible > 1 ? 's' : '') + ' reçu' + (ackIllisible > 1 ? 's' : '') + ' — dissection quand même : si un secret a été retenu, une lecture batterie répondra');
   }
   // DISSECTION DE LA CLÉ : quel secret envoyé la trottinette a-t-elle retenu ?
   const keyPre = await nbKey(c.name, c.token); // clé courante nom‖jeton
@@ -916,6 +928,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     log('fin de la dissection — la reprise tentera les lectures confirmées');
   }
   if (!c.M) throw new Error('étape 2 : pas de confirmation');
+  if (!mFlag && !c.O && !trouve) throw new Error('ack illisible sans confirmation : ni lecture ni 5D n’ont répondu — la fenêtre ne s’est sans doute pas ouverte (bascules du phare dès le DÉBUT de la fenêtre, pas après l’invite)');
   return true;
 }
 
