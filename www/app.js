@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.53';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.54';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -370,10 +370,13 @@ function showSheet() {
   $('avg').value = avg; $('avgOut').textContent = avg + ' km/h';
   $('routeInfo').innerHTML = `<div class="big">${min}<small>min</small></div><div class="km"><b>${fmtDist(route.distance)}</b><br>arrivée ${fmtClock(Date.now() + min * 60e3)}</div>`;
   const modeChip = (m, label) => `<span class="chip mode ${routeMode === m ? 'ok' : ''}" data-m="${m}" title="${m === 'safe' ? 'Pistes et voies cyclables en priorité' : 'Le trajet le plus court en temps'}">${label}</span>`;
-  $('chips').innerHTML = modeChip('safe', '🛡 Sécurisé') + modeChip('fast', '⚡ Rapide') + `<span class="chip">${I.pin}${esc(destName)}</span>` +
+  const voiceChip = TTS ? `<span class="chip mode ${voiceOn() ? 'ok' : ''}" data-voice="1" title="Annonces vocales : manœuvres, dangers, arrivée">🔊 Voix</span>` : '';
+  $('chips').innerHTML = modeChip('safe', '🛡 Sécurisé') + modeChip('fast', '⚡ Rapide') + voiceChip + `<span class="chip">${I.pin}${esc(destName)}</span>` +
     (n ? `<span class="chip warn">${I.alert}${n} signalement${n > 1 ? 's' : ''}</span>` : '');
 }
-$('chips').addEventListener('click', e => { // bascule Sécurisé / Rapide → recalcule l'itinéraire
+$('chips').addEventListener('click', e => { // puce voix + bascule Sécurisé / Rapide
+  const v = e.target.closest('[data-voice]');
+  if (v) { const on = !voiceOn(); store.set('voice', on ? 1 : 0); showSheet(); on ? say('Guidage vocal activé') : toast('Guidage vocal coupé 🔇'); return; }
   const b = e.target.closest('[data-m]');
   if (!b || b.dataset.m === routeMode) return;
   routeMode = b.dataset.m; store.set('rmode', routeMode);
@@ -409,6 +412,7 @@ document.addEventListener('visibilitychange', () => {
 function startRide(mode) {
   if (ride.active) return;
   Object.assign(ride, { active: true, mode, dist: 0, t0: Date.now(), moving: 0, max: 0, last: null, speed: 0, off: 0, idx: 0, lastReroute: 0, trk: [] });
+  navSay = { i: -1, far: false, near: false }; alerted = new Set();
   setState('ride'); wake(true); startWatch(); setFollow(true);
   $('results').hidden = true; $('q').blur();
   meEl && meEl.classList.toggle('hd', hdg != null);
@@ -417,6 +421,7 @@ function startRide(mode) {
   map.easeTo({ center: me || map.getCenter(), zoom: 17, pitch: 55, bearing: hdg || 0, duration: 1000 });
   if (mode === 'nav') navUpdate();
   toast(mode === 'nav' ? 'C’est parti ! Max ' + maxKmh() + ' km/h' : 'Compteur lancé – bonne route !');
+  mode === 'nav' && route && say('C’est parti. ' + fmtDist(route.distance).replace('.', ',') + ', environ ' + Math.max(1, Math.round(route.duration / 60)) + ' minutes.');
   sc.stored() && sc.connect(true); // trottinette associée : batterie en direct pendant le trajet
 }
 $('ridebtn').onclick = () => startRide('free');
@@ -442,6 +447,7 @@ function trackRide(c, now) {
   ride.speed = ride.speed ? ride.speed * .4 + kmh * .6 : kmh;
   if (kmh < 60) ride.max = Math.max(ride.max, kmh);
   // (plus d'easeTo ici : la caméra suit le curseur interpolé image par image, cf. meGo)
+  checkReportsAhead(); // nids-de-poule, contrôles… juste devant nous → vibre + voix
   if (ride.mode === 'nav') navUpdate();
 }
 function hudTick() {
@@ -455,6 +461,40 @@ function hudTick() {
   $('avgs').textContent = ride.moving > 5 ? (ride.dist / ride.moving * 3.6).toFixed(1).replace('.', ',') : '–';
   $('mx').textContent = Math.round(ride.max);
   if (Math.round(el) % 5 === 0) store.set('ride', { t0: ride.t0, dist: ride.dist, moving: ride.moving, max: ride.max, saved: Date.now() });
+}
+
+// ---------- guidage vocal (TTS fr-FR) + alertes de proximité ----------
+const TTS = 'speechSynthesis' in navigator;
+const voiceOn = () => TTS && store.get('voice', 1) === 1;
+let frVoice = null;
+if (TTS) { const pick = () => { frVoice = speechSynthesis.getVoices().find(v => /^fr/i.test(v.lang)) || null; }; speechSynthesis.onvoiceschanged = pick; pick(); }
+function say(txt, crit) { // crit = couper l'annonce en cours (manœuvre urgente) ; sinon on attend
+  if (!voiceOn()) return;
+  if (speechSynthesis.speaking) { if (!crit) return; speechSynthesis.cancel(); }
+  const u = new SpeechSynthesisUtterance(txt);
+  u.lang = 'fr-FR'; u.rate = 1.05; if (frVoice) u.voice = frVoice;
+  speechSynthesis.speak(u);
+}
+const bearingTo = (a, b) => { // cap vers un point (pour savoir si un signalement est DEVANT nous)
+  const rad = Math.PI / 180, y = Math.sin((b[0] - a[0]) * rad) * Math.cos(b[1] * rad),
+    x = Math.cos(a[1] * rad) * Math.sin(b[1] * rad) - Math.sin(a[1] * rad) * Math.cos(b[1] * rad) * Math.cos((b[0] - a[0]) * rad);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+};
+let navSay = { i: -1, far: false, near: false }, alerted = new Set(), alertChk = 0;
+function checkReportsAhead() { // signalement dans un cône de ±55° devant, < 160 m → vibre + voix (1 fois par trajet)
+  if (!ride.active || hdg == null || Date.now() - alertChk < 4000) return;
+  alertChk = Date.now();
+  for (const r of loadReports()) {
+    const key = r.id || r.t + '-' + r.type;
+    if (alerted.has(key)) continue;
+    const d = dist(me, [r.lng, r.lat]);
+    if (d < 15 || d > 160 || Math.abs(angDiff(hdg, bearingTo(me, [r.lng, r.lat]))) > 55) continue;
+    alerted.add(key);
+    navigator.vibrate?.([70, 60, 70]);
+    say('Attention, ' + REPORT_TYPES[r.type][1].toLowerCase() + ' dans ' + Math.round(d / 10) * 10 + ' mètres', true);
+    toast(REPORT_TYPES[r.type][0] + ' ' + REPORT_TYPES[r.type][1] + ' à ' + fmtDist(d));
+    break; // une alerte à la fois (les autres attendront le prochain tour, 4 s)
+  }
 }
 
 // ---------- guidage ----------
@@ -483,7 +523,12 @@ function navUpdate() {
   const ms = route.maneuvers, next = ms.find(m => m.begin > p.i);
   if (next && next.type !== 4 && next.type !== 5 && next.type !== 6) {
     $('navIcon').innerHTML = I.arrow; $('navIcon').firstChild.style.transform = `rotate(${turnAngle(next.type)}deg)`;
-    $('navDist').textContent = fmtDist(route.cum[next.begin] - p.along); $('navText').textContent = next.text;
+    const dm = route.cum[next.begin] - p.along;
+    $('navDist').textContent = fmtDist(dm); $('navText').textContent = next.text;
+    if (navSay.i !== next.begin) navSay = { i: next.begin, far: false, near: false }; // une annonce loin + une proche, par manœuvre
+    const kmh = Math.max(ride.speed, 8), farD = Math.max(150, kmh * 6), nearD = Math.max(40, kmh * 1.5);
+    if (!navSay.far && dm < farD) { navSay.far = true; say('Dans ' + Math.round(dm / 10) * 10 + ' mètres, ' + next.text, true); navigator.vibrate?.(50); }
+    else if (!navSay.near && dm < nearD) { navSay.near = true; say(next.text, true); navigator.vibrate?.([40, 40, 40]); }
   } else {
     $('navIcon').innerHTML = I.flag; $('navDist').textContent = fmtDist(rem); $('navText').textContent = 'Arrivée : ' + destName;
   }
@@ -496,11 +541,13 @@ async function reroute() {
     const r = await fetchRoute(me, dest, avgSpeed(), routeMode === 'safe');
     if (!ride.active) return;
     route = r; ride.idx = 0; ride.off = 0; syncRoute(); navUpdate(); refreshPois();
+    say('Itinéraire recalculé');
   } catch { toast('Recalcul impossible'); }
 }
 
 function endRide(arrived) {
   if (!ride.active) return;
+  arrived && say('Vous êtes arrivés à destination');
   ride.active = false; clearInterval(hudTimer); wake(false); store.del('ride');
   const s = { km: ride.dist / 1000, secs: (Date.now() - ride.t0) / 1000, avg: ride.moving > 5 ? ride.dist / ride.moving * 3.6 : 0, max: ride.max };
   if (s.km >= .02) { addTotals(s); pushRide(s, Date.now(), ride.trk); }
@@ -1538,9 +1585,10 @@ async function bleTestSecret() {
 
 // ---------- signalements ----------
 let cache = [];
+const reportTtl = t => (t === 'works' || t === 'police' ? CFG.reportTtlH : 30 * 24) * 3600e3; // travaux/contrôles : 48 h ; nids-de-poule, pavés, dangers, pistes : 30 jours
 function loadReports() {
   const local = store.get('reports', []);
-  return [...cache, ...local].filter(r => REPORT_TYPES[r.type] && Date.now() - r.t < CFG.reportTtlH * 3600e3);
+  return [...cache, ...local].filter(r => REPORT_TYPES[r.type] && Date.now() - r.t < reportTtl(r.type));
 }
 async function fetchReports() {
   if (!CFG.server || document.hidden) return; // pas de polling en arrière-plan (batterie)

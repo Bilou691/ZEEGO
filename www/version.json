@@ -1,5 +1,5 @@
 {
-  "v": "1.4.53",
+  "v": "1.4.54",
   "minShell": 1,
   "apk": {
     "rev": 2,
@@ -11,7 +11,7 @@
     "style.css"
   ],
   "sha": {
-    "js": "63ef7902878bac654787ee4fd6e4f00918b30cc255414af80ac624e3aa8ea260",
+    "js": "86c9276b011b194ad4522e1a32bda5679d4019bd60e43e58219ff638b2c4bb27",
     "css": "7da5cd39baad72572ebcba9e3a8b6eb06ff0ceec37b7ccd1d3b24556bbf64d7c"
   }
 }
