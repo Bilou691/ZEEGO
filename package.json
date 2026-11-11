@@ -4,7 +4,7 @@
   "description": "",
   "main": "app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node tools/check-version.mjs && node tools/test-ble-vectors.mjs"
   },
   "keywords": [],
   "author": "",

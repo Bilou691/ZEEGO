@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.39';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.40';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -796,7 +796,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
         const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
         const dd = await nbParse(cc, f); if (dd && dd.cmd === 0x04) { p = dd.payload; }
         if (!p) { const r = await nbOpen0(kSess, f); if (r.ok && r.pt[5] === 0x04) p = r.pt.slice(7); }
-        if (p) log(`  ← RÉPONSE [${lab} · ${fmt}] : ${(toHex(p).match(/../g) || []).join(' ')}`);
+        if (p) log(`  ← RÉPONSE [${essaisNoms[i]} · ${fmt}] : ${(toHex(p).match(/../g) || []).join(' ')}`);
       }
       if (p) { trouve = essaisCle[i]; break; }
     }
