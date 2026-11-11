@@ -100,6 +100,19 @@ Lire **batterie, kilométrage, vitesse** de la Segway-Ninebot **ZT3 Pro** dans l
 5. Récupérer le rapport (« Copier le rapport ») — chaque ligne `→`/`←` est de l'or : décoder offline avec les clés candidates (scripts Node dans l'historique de session).
 6. Une seule variable par version si possible ; le rapport de Billel fait foi.
 
+## 10. Rapport du 2026-11-11 (v1.4.41) — 4 échecs SILENCIEUX, un comportement nouveau
+
+Rapport d'association de 08:35 (4 connexions fraîches, o1 cpt0 à secrets uniques ×4 par connexion) :
+
+- **Étape 1 : 4/4 ✓** (jeton frais à chaque connexion, MTU 251, INDEX=1 signalé à chaque réponse 0x5B).
+- **Étape 2 : AUCUNE trame entrante** pendant les 4 fenêtres de 30 s. Ce silence est **RÉEL** (pas un angle mort du journal : le `recv` de `nbConnect` journalise toute trame entrante via son logger par défaut). Avant, la trottinette ackait les o1 avec des réponses « …0002 » (probables 5C 00) ; là, elle a ignoré les propositions sans même les acker.
+- **Hypothèses principales sur ce silence**, par ordre de probabilité :
+  1. **Phare allumé au départ des tentatives** (règle 4 : allumé immobile = rien) — aggravé par le fait que l'app ne laissait que 1,5 s entre deux tentatives, donc impossible d'éteindre le phare : tentatives 2-4 condamnées d'office. Et l'allumage d'une ZT3 Pro rallume le phare par défaut.
+  2. **État général de la trottinette** (règle 10 : les succès arrivent sur power-cycle récent).
+  3. **INDEX=1 actif** = le secret d'une ACCEPTATION TROTTI PRÉCÉDENTE — tester « Connecter » dans le panneau (reprise avec le secret stocké dans `trotti.scooter`) pour voir si les lectures répondent.
+- **v1.4.42 en réponse** : jeton + secrets o1 en CLAIR dans le rapport (analyse hors-ligne sans nouvelle session), `nbTryDecode` (3 clés × f-XOR/SN × compteurs voisins) sur toute trame indéchiffrable pour casser les « …0002 » en direct, invitation réalignée sur la règle 4 (**bascules répétées 1-2 s**, pas un seul appui — le texte 1.4.36 contredisait le dossier), attente d'un appui sur « Trottinette prête (phare éteint) » entre les tentatives.
+- **Bifurcation suivante** : si SHU arrive à s'appairer à cette trottinette → `adb logcat -s ToothSErvice` pendant un appairage SHU réel (piste 5, le chemin le plus court vers la vérité) ; si SHU échoue aussi → réinitialisation d'usine (piste 6) comme variable contrôlée.
+
 ---
 
-*Dossier rédigé par ZCode (GLM-5.3) avec Billel, 2026-11-08. Bonne chance à la prochaine IA — on est très proches : l'appairage marche, il ne reste que la lecture.* 🛴
+*Dossier rédigé par ZCode (GLM-5.3) avec Billel, 2026-11-08, mis à jour le 2026-11-11. Bonne chance à la prochaine IA — on est très proches : l'appairage marche, il ne reste que la lecture.* 🛴

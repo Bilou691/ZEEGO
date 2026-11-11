@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.41';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.42';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -662,6 +662,32 @@ async function nbOpen0(key, wire) { // déchiffre une trame format compteur 0 et
 }
 // ---- [nb-crypto] fin du bloc pur ----
 
+// Forçage de lecture : la trottinette répond parfois par des trames qu'on ne sait pas déchiffrer
+// (« …0002 » — probablement des 5C 00). On essaie les 3 clés candidates × (f-XOR + compteurs SN
+// voisins de celui de la queue), et on journalise la combinaison qui ouvre la trame.
+async function nbTryDecode(c, wire, log) {
+  if (!wire || wire.length < 15 || wire[0] !== 0x5A || wire[1] !== 0xA5) return;
+  const ctrIn = (wire[wire.length - 2] << 8) | wire[wire.length - 1];
+  const body = wire.slice(3, wire.length - 6);
+  const cles = [['courante', c.key], ['session', await nbKey(c.random, c.token)], ['initiale', await nbKey(c.name, NB_FW)]];
+  const cherche = out => {
+    for (let i = 0; i + 4 <= out.length; i++)
+      if (out[i] === 0x3E && [0x5B, 0x5C, 0x5D].includes(out[i + 2])) return { cmd: out[i + 2], arg: out[i + 3] };
+    return null;
+  };
+  for (const [nom, cle] of cles) {
+    const cc = Object.assign(Object.create(c), { key: cle });
+    const essais = [];
+    try { essais.push(['fXor', await cc.fXor(body)]); } catch {}
+    for (let ctr = Math.max(1, ctrIn - 2); ctr <= ctrIn + 3; ctr++) { try { essais.push(['ctr ' + ctr, await cc.ctrBody(body, ctr)]); } catch {} }
+    for (const [tag, out] of essais) {
+      const m = cherche(out);
+      if (m) { log(`  ← décodé ! clé ${nom} · ${tag} · cmd 0x${m.cmd.toString(16)} arg 0x${m.arg.toString(16)} — ce sont ces clé/compteur qu'il faut utiliser ici`); return; }
+    }
+  }
+  log(`  ← trame indéchiffrable (corps ${body.length} o, queue ${toHex(wire.slice(-6))})`);
+}
+
 // ---------- Transport BLE : connexion + file de trames ----------
 async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour l'écran d'association
   await BLE.connect({ deviceId: id, timeout: 15000 }); // le plugin y négocie déjà un MTU de 512 (max accepté par la trottinette)
@@ -707,7 +733,7 @@ async function nbConnect(id, log) { // log facultatif (hex de chaque trame) pour
 // ---------- Poignée de main en 3 étapes (flot SHU, cf. pepperonas/zt3_cli/handshake.py) ----------
 // PORTÉE VOLONTAIREMENT LIMITÉE : session établie pour LIRE (batterie, kilométrage…).
 // Aucune commande de conduite (ni verrouillage, ni réglages, ni firmware).
-async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fixedRandom) {
+async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
   if (variant && variant.hello) { // réplique du 1er fil réel SHU (Phase B/E2) : salut 0x5C VIDE, sans 0x5B préalable
     const h = Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, variant.dst || 0x04, 0x5C, 0x00]);
     for (let a = 0; a < 6 && !c.L; a++) {
@@ -730,6 +756,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
   };
   await etape1();
   log(`étape 1 ✓ jeton reçu · série « ${hexAscii(toHex(c.challenge))} »${c.pwdStored ? ' · un secret est déjà enregistré (INDEX=' + c.pwdStored + '), le nouveau le remplacera' : ''}`);
+  log('jeton de session : ' + toHex(c.token)); // en clair dans le rapport → décryptage hors-ligne possible
   const etape3 = async (nTries) => { // SHU D0() : écho de la série (0x5D) toutes les 500 ms jusqu'au 5D 01
     for (let a = 0; a < nTries && !c.O && !t.lost; a++) {
       await t.send(await nbWrap(c, 0x04, 0x5D, 0x00, c.challenge), l => log('  ' + l));
@@ -772,6 +799,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
     const init = c.buildPairInit(0x04);
     const r = toHex(init.slice(7, 23));
     envoyes.push(r); c.random.set(init.slice(7, 23));
+    log('  secret o1 #' + envoyes.length + ' (clair) : ' + r); // pour l'analyse hors-ligne depuis le rapport copié
     await t.send(await nbSeal0(await nbKey(c.name, c.token), init));
   };
   await envoi();
@@ -781,15 +809,18 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted, fix
     if (!d2 && Date.now() - t1 > 4000) { d2 = true; await envoi(); } // o1 #2, #3, #4 à +4/8/12 s (≤4 propositions par connexion)
     if (!d3 && Date.now() - t1 > 8000) { d3 = true; await envoi(); }
     if (!d4 && Date.now() - t1 > 12000) { d4 = true; await envoi(); }
-    const f = await t.recv(60); if (!f) continue;
+    const f = await t.recv(60); if (!f) continue; // toute trame entrante est déjà journalisée par nbConnect
     let d = await nbParse(c, f);
     if (!d) { const r = await nbOpen0(await nbKey(c.name, c.token), f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5C) d = { cmd: 0x5C, arg: r.pt[6] }; }
     if (d && d.cmd === 0x5C) {
       if (d.arg === 1) { mFlag = true; log(`← 5C 01 : ACCEPTÉ ✓ (après ${envoyes.length} envois)`); }
-      else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 2 s) jusqu’à « ACCEPTÉ »…'); }
-    }
+      else if (!asked) { asked = true; log('⏺ 5C 00 : BASCULE LE PHARE (~toutes les 1-2 s) jusqu’à « ACCEPTÉ »…'); }
+    } else if (!d) await nbTryDecode(c, f, log); // trame non lisible (les mystérieuses « …0002 ») : forçage multi-clés
   }
-  if (!mFlag) throw new Error('pas de 5C 01 sur cette connexion (le secret est inchangé, la tentative suivante le réutilise)');
+  if (!mFlag) { // jeton + secrets en clair dans le rapport : l'analyse hors-ligne ne dépend plus d'une nouvelle session
+    log('jeton : ' + toHex(c.token) + ' · secrets proposés : ' + envoyes.join(' '));
+    throw new Error('pas de 5C 01 sur cette connexion');
+  }
   // DISSECTION DE LA CLÉ : quel secret envoyé la trottinette a-t-elle retenu ?
   const keyPre = await nbKey(c.name, c.token); // clé courante nom‖jeton
   const keyInit = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
@@ -1050,10 +1081,14 @@ function scPanelWire(m) {
   sc.render();
 }
 
+// Affiche un bouton d'étape dans le journal d'association et attend son appui :
+// le rythme doit rester humain — la trottinette doit être remise à plat (phare éteint) entre deux tentatives.
+const waitBtn = (m, sel) => new Promise(r => { const b = m.querySelector(sel); b.hidden = false; b.onclick = () => { b.hidden = true; b.onclick = null; r(); }; });
+
 // ---------- Association d'une nouvelle trottinette (flot SHU complet, avec journal) ----------
 async function blePair() {
   const m = openModal(`<h3>🛴 Associer ma trottinette</h3><div class="about" style="margin-top:-6px">Allume la trottinette, ferme l’appli Segway, garde-la à portée. Un appui bref sur son bouton d’allumage peut être demandé. Trotti ne pilote jamais la trottinette : association et lectures uniquement.</div>
-    <pre id="bleLog" class="blelog"></pre><button class="btn sec" id="bleCopy" style="margin:10px 0" hidden>Copier le rapport</button><button class="btn main" data-close>Fermer</button>`);
+    <pre id="bleLog" class="blelog"></pre><button class="btn main" id="bleNext" hidden style="margin:10px 0">Trottinette prête (phare éteint) →</button><button class="btn sec" id="bleCopy" style="margin:10px 0" hidden>Copier le rapport</button><button class="btn main" data-close>Fermer</button>`);
   const pre = m.querySelector('#bleLog'), lines = [`Trotti v${V} · association · ${new Date().toLocaleString('fr-FR')}`];
   const log = t => { lines.push(t); pre.textContent = lines.join('\n'); pre.scrollTop = pre.scrollHeight; };
   m.querySelector('#bleCopy').onclick = async e => { try { await navigator.clipboard.writeText(lines.join('\n')); e.target.textContent = 'Rapport copié ✓'; } catch { e.target.textContent = 'Copie impossible : fais une capture'; } };
@@ -1065,15 +1100,18 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
-    const fixedRandom = crypto.getRandomValues(new Uint8Array(16)); // UN seul secret pour toute l'association (comme SHU)
     let ok = false;
-    for (let essai = 1; essai <= 4 && !ok; essai++) { // jusqu'à 4 connexions fraîches — 1 seul o1 par connexion (limite firmware ~5)
-      if (essai > 1) { log(`\n— tentative ${essai}/4 sur une connexion fraîche (même secret) —`); await sleep(1500); }
+    for (let essai = 1; essai <= 4 && !ok; essai++) { // jusqu'à 4 connexions fraîches — 4 o1 max par connexion (limite firmware ~5)
+      if (essai > 1) { // avant : 1,5 s seulement → le phare restait allumé et la tentative était condamnée d'office (règle 4 du dossier)
+        log(`\n— tentative ${essai}/4 — ÉTEINS le phare (1 appui sur le bouton de la trottinette), attends 2 s, puis valide ci-dessous —`);
+        await waitBtn(m, '#bleNext');
+        await sleep(1500);
+      }
       try {
         t = await nbConnect(id, h => log(h));
         const c = new NbCrypto(name);
-        const invite = '\n⏺ IMPORTANT : phare ÉTEINT au départ (éteins-le entre les tentatives) — À l’⏽ : UN appui pour l’ALLUMER puis laisse-le allumé : c’est l’allumage qui ouvre la fenêtre’à « ACCEPTÉ »…\n';
-        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) }), fixedRandom); // le secret est sauvé DÈS le 5C 01
+        const invite = '\n⏺ MAINTENANT : bascule le PHARE en rythme (ON/OFF/ON/OFF…) toutes les 1-2 s, sans t’arrêter, jusqu’à « ACCEPTÉ ». Le geste qui a marché : des bascules répétées pendant toute la fenêtre — pas un seul appui.\n';
+        await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) })); // le secret est sauvé DÈS le 5C 01
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
         // comme SHU : on déconnecte, on souffle, et on reprend en mode reprise (le chemin éprouvé).
