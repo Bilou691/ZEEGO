@@ -50,6 +50,11 @@ Totaux, **historique des 60 derniers trajets** (date, distance, durée, vitesse 
 32/45/60 pour une trottinette débridée ou un vélo électrique — la jauge adapte son échelle et son alerte).
 La vitesse de croisière de l'itinéraire va jusqu'à 45 km/h.
 
+**Mes trajets ⭐** : garde un trajet que tu viens de faire (bouton dans le résumé de fin) → il devient un favori.
+« ▶ Y aller » navigue ensuite sur TON itinéraire tel quel ; « ⚖️ Débrief » le compare à ce que Trotti proposerait
+aujourd'hui (km, minutes, verdict) ; les répétitions du même trajet (même départ/arrivée) sont comptées avec record.
+**💾 Exporter / Importer** : sauvegarde JSON de toutes tes données (trajets, historique, réglages).
+
 ## Itinéraire
 
 Moteur Valhalla (profil vélo), deux profils au choix via les puces dans la fiche itinéraire :

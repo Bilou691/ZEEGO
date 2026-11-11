@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.51';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.52';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -490,6 +490,97 @@ async function dlGpx(r) { // export GPX : partage Android d'abord, téléchargem
   } catch { toast('Export GPX impossible sur cet appareil'); }
 }
 
+// ---------- Mes trajets enregistrés (favoris + débrief comparatif) ----------
+const trips = () => store.get('trips', []);
+function saveTrip(name, s, trk) {
+  if (!trk || trk.length < 5) return toast('Trace trop courte pour être gardée');
+  const T = trips();
+  T.push({ id: Date.now(), name: name || 'Trajet ' + (T.length + 1), start: trk[0], end: trk[trk.length - 1], km: +s.km.toFixed(2), secs: Math.round(s.secs), best: Math.round(s.secs), n: 1, t: Date.now(), trk });
+  store.set('trips', T.slice(-15));
+  toast('Trajet « ' + name + ' » gardé ⭐');
+}
+function matchTrip(trk) { // trajet répété ? (même départ < 300 m, même arrivée < 200 m)
+  if (!trk || trk.length < 5) return null;
+  const a = trk[0], b = trk[trk.length - 1];
+  return trips().find(tp => dist(tp.start, a) < 300 && dist(tp.end, b) < 200) || null;
+}
+function makeRoute(coords, duration) { // objet route depuis une trace (pas de manœuvres → guidage « arrivée »)
+  const r = { coords, duration, avg: avgSpeed(), maneuvers: [] };
+  r.cum = [0]; for (let i = 1; i < coords.length; i++) r.cum[i] = r.cum[i - 1] + dist(coords[i - 1], coords[i]);
+  r.distance = r.cum[r.cum.length - 1];
+  return r;
+}
+function goTrip(tp, closeModal) { // naviguer en suivant TON itinéraire enregistré
+  if (ride.active) return toast('Termine d’abord ton trajet en cours');
+  closeModal && closeModal();
+  dest = tp.end; destName = tp.name; placeDest();
+  route = makeRoute(tp.trk, tp.secs); syncRoute(); fitRoute();
+  showSheet(); setState('route'); refreshPois();
+  toast('Itinéraire « ' + tp.name + ' » — le tien ⭐');
+}
+const verdictTxt = (myKm, myMin, sugKm, sugMin) => {
+  const dk = +(myKm - sugKm).toFixed(1), dm = Math.round(myMin - sugMin);
+  if (dk <= 0 && dm <= 0) return `✅ Ton trajet gagne : ${dk ? Math.abs(dk).toString().replace('.', ',') + ' km et ' : ''}${Math.abs(dm)} min de moins que le proposé`;
+  if (dk <= 0) return `↔️ Ton trajet est plus court de ${Math.abs(dk).toString().replace('.', ',')} km, mais ${dm} min de plus`;
+  if (dm <= 0) return `⚡ Ton trajet est plus rapide de ${Math.abs(dm)} min, mais ${dk.toString().replace('.', ',')} km de plus`;
+  return `🐌 Le proposé gagne : ${dk.toString().replace('.', ',')} km et ${dm} min de moins`;
+};
+async function showDebrief(tp) { // mon trajet vs ce que Trotti proposerait aujourd'hui
+  const m = openModal(`<h3>⚖️ Débrief « ${esc(tp.name)} »</h3><div id="dbBody"><div class="about">Calcul de l’itinéraire proposé…</div></div>
+    <button class="btn main" data-close>Fermer</button>`);
+  const body = m.querySelector('#dbBody');
+  try {
+    const r = await fetchRoute(tp.start, tp.end, avgSpeed(), routeMode === 'safe');
+    body.innerHTML = `<div class="bigstat">
+      <div class="hero"><b>${nb1(tp.km)} km</b><small>Ton trajet · ${fmtTime(tp.secs)}${tp.best < tp.secs ? ' · record ' + fmtTime(tp.best) : ''}</small></div>
+      <div><b>${nb1(r.distance / 1000)} km</b><small>Proposé · ${fmtTime(r.duration)}</small></div></div>
+      <div class="about" style="text-align:center;font-size:13.5px;font-weight:700;color:var(--g3)">${verdictTxt(tp.km, tp.secs / 60, r.distance / 1000, r.duration / 60)}</div>
+      <div class="about">Proposé = profil ${routeMode === 'safe' ? '🛡 Sécurisé' : '⚡ Rapide'} à ${avgSpeed()} km/h. Le temps de TON trajet inclut tes arrêts (feux…) — le proposé ne les connaît pas.</div>`;
+  } catch {
+    body.innerHTML = '<div class="about">Itinéraire proposé indisponible (réseau ?) — réessaie plus tard.</div>';
+  }
+}
+function keepTripPrompt(s, trk) { // nommer et garder le trajet qu'on vient de faire
+  const m = openModal(`<h3>⭐ Garder ce trajet</h3><div class="about" style="margin-top:-6px">« Y aller » suivra TON itinéraire tel quel, et le débrief le comparera à ce que Trotti proposerait (km, minutes).</div>
+    <input id="tn" autocomplete="off" style="width:100%;font:15px inherit;padding:11px;border-radius:12px;border:1px solid var(--bd);background:var(--chip);color:var(--fg)" placeholder="ex. Domicile → Travail (par les berges)">
+    <div class="btns"><button class="btn sec" data-close>Annuler</button><button class="btn main" id="tnGo">Garder</button></div>`);
+  const go = () => { const n = m.querySelector('#tn').value.trim(); if (!n) return toast('Donne-lui un nom'); saveTrip(n, s, trk); m.hidden = true; m.innerHTML = ''; };
+  m.querySelector('#tnGo').onclick = go;
+  m.querySelector('#tn').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
+
+// ---------- sauvegarde / restauration des données ----------
+const BACKUP_KEYS = ['totals', 'rides', 'trips', 'avg', 'rmode', 'maxkmh', 'pois', 'reports', 'pos', 'lastv'];
+async function exportData() {
+  const data = {};
+  BACKUP_KEYS.forEach(k => { const v = localStorage.getItem('trotti.' + k); if (v != null) data['trotti.' + k] = v; });
+  const txt = JSON.stringify({ app: 'Trotti', v: V, t: Date.now(), data });
+  try {
+    const f = new File([txt], 'trotti-sauvegarde-' + new Date().toISOString().slice(0, 10) + '.json', { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [f] })) return navigator.share({ files: [f], title: 'Sauvegarde Trotti' });
+  } catch {}
+  try {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' })); a.download = 'trotti-sauvegarde.json';
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch { toast('Export impossible sur cet appareil'); }
+}
+function importData(file) {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const j = JSON.parse(r.result);
+      if (!j || j.app !== 'Trotti' || !j.data) throw 0;
+      let n = 0;
+      Object.entries(j.data).forEach(([k, v]) => { if (k.startsWith('trotti.') && BACKUP_KEYS.includes(k.slice(7))) { localStorage.setItem(k, v); n++; } });
+      if (!n) throw 0;
+      toast('Sauvegarde restaurée ✓ — redémarrage…');
+      setTimeout(() => TrottiBoot.reload(), 900);
+    } catch { toast('Fichier de sauvegarde invalide'); }
+  };
+  r.readAsText(file);
+}
+
 // ---------- fenêtres ----------
 function openModal(html, onClose) {
   const m = $('modal'); m.innerHTML = `<div class="card">${html}</div>`; m.hidden = false;
@@ -499,11 +590,23 @@ function openModal(html, onClose) {
   return m;
 }
 function showSummary(s, arrived) {
-  openModal(`<h3>${arrived ? '🏁 Vous êtes arrivé !' : 'Trajet terminé'}</h3>
+  const tp = matchTrip(ride.trk);
+  let repeatHtml = '';
+  if (tp) { // trajet connu : on met à jour ses stats et on débriefe la répétition
+    tp.n++; tp.t = Date.now(); tp.km = +s.km.toFixed(2); tp.secs = Math.round(s.secs);
+    const rec = tp.best; if (s.secs < tp.best) tp.best = Math.round(s.secs);
+    const T = trips(); T[T.findIndex(x => x.id === tp.id)] = tp; store.set('trips', T);
+    repeatHtml = `<div class="about" style="text-align:center;font-weight:700;color:var(--g3)">🔁 « ${esc(tp.name)} » · ${tp.n}ᵉ fois · ${s.secs <= rec ? '🏆 NOUVEAU RECORD !' : 'record ' + fmtTime(rec) + ' (+ ' + fmtTime(s.secs - rec) + ')'}</div>`;
+  }
+  const keepable = !tp && ride.trk && ride.trk.length >= 5;
+  const m = openModal(`<h3>${arrived ? '🏁 Vous êtes arrivé !' : 'Trajet terminé'}</h3>
+    ${repeatHtml}
     <div class="bigstat"><div class="hero"><b>${fmtKm(s.km * 1000)} km</b><small>Distance parcourue</small></div>
     <div><b>${fmtTime(s.secs)}</b><small>Durée</small></div><div><b>${s.avg ? s.avg.toFixed(1).replace('.', ',') : '–'}</b><small>Vitesse moy. km/h</small></div>
-    <div><b>${Math.round(s.max)}</b><small>Vitesse max km/h</small></div><div><b>${fmtKm((store.get('totals', { km: 0 }).km) * 1000)}</b><small>Total km</small></div></div>
+    <div><b>${Math.round(s.max)}</b><small>Vitesse max</small></div><div><b>${fmtKm((store.get('totals', { km: 0 }).km) * 1000)}</b><small>Total km</small></div></div>
+    ${keepable ? '<button class="btn sec" id="keepTrip" style="margin-bottom:10px">⭐ Garder ce trajet (favori + débrief)</button>' : ''}
     <button class="btn main" data-close>Super !</button>`);
+  keepable && (m.querySelector('#keepTrip').onclick = () => { m.hidden = true; m.innerHTML = ''; keepTripPrompt(s, ride.trk); });
 }
 $('statsBtn').onclick = () => {
   const t = store.get('totals', { km: 0, rides: 0, secs: 0 });
@@ -512,17 +615,32 @@ $('statsBtn').onclick = () => {
     const d = new Date(r.t);
     return `<div class="rideRow"><div><b>${fmtKm(r.km * 1000)} km</b><small>${d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })} · ${fmtTime(r.secs)} · max ${Math.round(r.max)} km/h${r.avg ? ' · moy ' + nb1(r.avg) : ''}</small></div>${r.trk && r.trk.length > 1 ? `<button class="chip mode" data-gpx="${rides.length - 1 - i}">GPX</button>` : ''}</div>`;
   }).join('')}</div></details>` : '';
+  const T = trips();
+  const tripsHtml = T.length ? `<details class="sclog"><summary>Mes trajets ⭐ (${T.length})</summary><div class="ridelist">${T.map(tp => `<div class="rideRow tripRow"><div><b>${esc(tp.name)}</b><small>${nb1(tp.km)} km · record ${fmtTime(tp.best)} · ${tp.n}× · dern. ${new Date(tp.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</small></div><span class="chip mode" data-go="${tp.id}" title="Naviguer sur cet itinéraire">▶</span><span class="chip mode" data-db="${tp.id}" title="Débrief : mon trajet vs proposé">⚖️</span><span class="chip mode" data-del="${tp.id}" title="Supprimer">✕</span></div>`).join('')}</div></details>` : '';
   const m = openModal(`<h3>Mes kilomètres</h3>
     <div class="bigstat"><div class="hero"><b>${fmtKm(t.km * 1000)} km</b><small>Total en trottinette</small></div>
     <div><b>${t.rides}</b><small>Trajets</small></div><div><b>${t.secs >= 3600 ? Math.floor(t.secs / 3600) + ' h ' + pad(Math.floor(t.secs % 3600 / 60)) : Math.floor(t.secs / 60) + ' min'}</b><small>Sur la route</small></div></div>
     <div class="speedlim"><b>⚡ Limite du compteur</b><small>25 km/h = EDPM légal en France. À régler si ta monture va plus vite (débridée, vélo électrique) : la jauge adapte son échelle et son alerte. Sur voie publique, la loi reste la loi.</small>
       <div class="chips" style="margin-top:8px">${LIMS.map(v => `<span class="chip mode ${v === maxKmh() ? 'ok' : ''}" data-lim="${v}">${v} km/h</span>`).join('')}</div></div>
     ${histHtml}
+    ${tripsHtml}
     ${scPanelHtml()}
     <div class="about">Trotti v${V} · Cartes © OpenStreetMap, © CARTO · Itinéraires Valhalla · Adresses Photon</div>
-    <button class="btn sec" id="chk" style="margin-bottom:10px">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`,
+    <div class="btns"><button class="btn sec" id="exp">💾 Exporter mes données</button><button class="btn sec" id="imp">Importer</button></div>
+    <input type="file" id="impF" accept="application/json,.json" hidden>
+    <button class="btn sec" id="chk" style="margin:10px 0">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`,
     () => { sc.panel = null; sc.renderHook = null; });
   scPanelWire(m);
+  m.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { const tp = trips().find(x => x.id === +b.dataset.go); tp && goTrip(tp, () => { m.hidden = true; m.innerHTML = ''; }); });
+  m.querySelectorAll('[data-db]').forEach(b => b.onclick = () => { const tp = trips().find(x => x.id === +b.dataset.db); tp && showDebrief(tp); });
+  m.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+    if (b.dataset.c) { store.set('trips', trips().filter(x => x.id !== +b.dataset.del)); $('statsBtn').onclick(); }
+    else { b.dataset.c = '1'; b.textContent = 'Sûr ?'; setTimeout(() => { delete b.dataset.c; b.textContent = '✕'; }, 2500); }
+  });
+  m.querySelector('#exp').onclick = exportData;
+  const imp = m.querySelector('#imp');
+  imp.onclick = () => { if (imp.dataset.c) m.querySelector('#impF').click(); else { imp.dataset.c = '1'; imp.textContent = 'Remplacer tout ?'; setTimeout(() => { delete imp.dataset.c; imp.textContent = 'Importer'; }, 2500); } };
+  m.querySelector('#impF').onchange = e => { e.target.files[0] && importData(e.target.files[0]); };
   m.querySelectorAll('[data-lim]').forEach(ch => ch.onclick = () => { store.set('maxkmh', +ch.dataset.lim); $('statsBtn').onclick(); }); // régénère le modal (puces + jauge à jour)
   m.querySelectorAll('[data-gpx]').forEach(b => b.onclick = () => dlGpx(rides[+b.dataset.gpx]));
   m.querySelector('#chk').onclick = async e => {

@@ -92,6 +92,8 @@ body[data-s=ride] #top{transform:translateY(-140%);opacity:0;pointer-events:none
 .rideRow b{font-size:15px}
 .rideRow small{display:block;color:var(--mut);font-size:11.5px;margin-top:2px;font-weight:600}
 .rideRow .chip{flex:none}
+.tripRow .chip{padding:6px 9px;font-size:11.5px}
+.tripRow b{font-size:14.5px}
 .speedrow{display:flex;align-items:center;gap:12px;margin-top:14px;font-size:13px;color:var(--mut);font-weight:600}
 .speedrow input{flex:1;accent-color:var(--g2);height:28px}
 .speedrow output{color:var(--fg);min-width:62px;text-align:right}
