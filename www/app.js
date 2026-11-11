@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.47';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.48';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -828,9 +828,9 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
       await nbTryDecode(c, f, log, envoyes);
     }
   }
+  if (mFlag || ackIllisible) store.set('o1cand', [...new Set([...store.get('o1cand', []), ...envoyes])].slice(-12)); // acceptation OU ack : un de ces secrets est probablement stocké → la reprise À FROID de la prochaine session les testera
   if (!mFlag) { // jeton + secrets en clair dans le rapport : l'analyse hors-ligne ne dépend plus d'une nouvelle session
     log('jeton : ' + toHex(c.token) + ' · secrets proposés : ' + envoyes.join(' '));
-    if (ackIllisible) store.set('o1cand', [...new Set([...store.get('o1cand', []), ...envoyes])].slice(-12)); // la reprise À FROID de la prochaine tentative les testera (Q0, sans étape 1)
     if (!ackIllisible) throw new Error('pas de 5C 01 sur cette connexion');
     // L'ack « …0002 » est indéchiffrable (clé inconnue — probablement le secret INDEX=1), MAIS s'il s'agit
     // d'un 5C 01 chiffré sous le secret retenu, une LECTURE sous ce secret répondra. La dissection qui suit
@@ -1102,7 +1102,7 @@ function scPanelHtml() {
     <div class="scgrid" id="scGrid">${ZT3_REGS.map(scCell).join('')}</div>
     <div class="btns" style="margin-top:10px"><button class="btn sec" id="scGo">${sc.state === 'live' ? 'Actualiser' : 'Connecter'}</button><button class="btn sec" id="scForget">Oublier</button></div>
     <details class="sclog"><summary>Journal technique</summary><pre id="scLogPre">${sc.log.join('\n') || '—'}</pre></details>
-    <details class="sclog"><summary>Outils de diagnostic</summary><button class="btn sec" id="bleBtn" style="margin-top:8px">🔵 Diagnostic Bluetooth (lecture seule)</button></details>
+    <details class="sclog"><summary>Outils de diagnostic</summary><button class="btn sec" id="bleBtn" style="margin-top:8px">🔵 Diagnostic Bluetooth (lecture seule)</button><button class="btn sec" id="sxBtn" style="margin-top:8px">🧪 Tester un secret (hex d'un rapport)</button></details>
   </div>`;
 }
 function scPanelWire(m) {
@@ -1127,6 +1127,7 @@ function scPanelWire(m) {
     else { e.target.textContent = 'Confirmer ?'; e.target.dataset.c = '1'; setTimeout(() => { e.target.textContent = 'Oublier'; delete e.target.dataset.c; }, 2500); }
   };
   const diag = m.querySelector('#bleBtn'); diag && (diag.onclick = () => bleDiag());
+  const sx = m.querySelector('#sxBtn'); sx && (sx.onclick = () => bleTestSecret());
   sc.render();
 }
 
@@ -1204,9 +1205,9 @@ async function blePair() {
         // comme SHU : on déconnecte, on souffle, et on reprend en mode reprise (le chemin éprouvé).
         log('secret accepté ✓ — déconnexion puis reprise pour les lectures…');
         try { await t.close(); } catch {} t = null;
-        await sleep(3000);
+        await sleep(6000); // la trottinette doit souffler après ~60 trames : les reprises à +3 s ont mangé deux 133 le 11/11
         let lu = 0;
-        for (const pause of [0, 4000]) { // la trottinette a parfois besoin de souffler après un appairage : 2 tentatives
+        for (const pause of [0, 15000]) { // 2 tentatives, la 2ᵉ bien après le souffle
           if (pause) { log('nouvelle tentative de reprise dans 4 s…'); await sleep(pause); }
           if (await sc.connect(true, l => log('  ' + l))) {
             await sleep(1200); await sc.poll();
@@ -1244,6 +1245,52 @@ async function blePair() {
     if (t) { try { await t.close(); } catch {} }
     m.querySelector('#bleCopy').hidden = false;
   }
+}
+
+// ---------- Tester un secret (hex collé depuis un rapport) : trancher QUEL secret la trottinette a stocké ----------
+// Cas d'usage : l'acceptation 5C 01 n'identifie pas le secret retenu (l'ack peut répondre à l'o1 #3 ou #4).
+// Test À FROID (connexion vierge, sans étape 1, clé SHA1(secret‖zéros), 0x5D cpt0 challenge vide) :
+// si la trottinette a stocké CE secret, elle répond 5D 01 → on l'adopte et la session s'établit.
+async function bleTestSecret() {
+  const rec = store.get('scooter'); if (!rec) return toast('Associe d’abord la trottinette');
+  const m = openModal(`<h3>🧪 Tester un secret</h3><div class="about" style="margin-top:-6px">Colle un secret o1 (32 caractères hex) copié d'un rapport d'association — en priorité ceux envoyés juste avant un « 5C 01 : ACCEPTÉ ». Test à froid sur connexion vierge : si la trottinette l'a stocké, elle répondra 5D 01 et la session s'établira.</div>
+    <input id="sx" autocomplete="off" spellcheck="false" style="width:100%;font:14px ui-monospace,monospace;padding:11px;border-radius:12px;border:1px solid var(--bd);background:var(--chip);color:var(--fg)" placeholder="ex. 22b21066a8673029beb07d39657cd4de">
+    <pre id="bleLog" class="blelog"></pre><button class="btn main" id="sxGo" style="margin:10px 0">Tester ce secret</button><button class="btn sec" data-close>Fermer</button>`);
+  const pre = m.querySelector('#bleLog');
+  const log = t => { pre.textContent += t + '\n'; pre.scrollTop = pre.scrollHeight; };
+  if (!BLE) return log('Bluetooth indisponible : installe le dernier APK.');
+  m.querySelector('#sxGo').onclick = async () => {
+    const hex = m.querySelector('#sx').value.trim().replace(/[\s,;]+/g, '').toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(hex)) return log('✗ il faut exactement 32 caractères hex (16 octets)');
+    try {
+      await BLE.initialize({ androidNeverForLocation: true });
+      log('connexion à ' + (rec.name || 'la trottinette') + '…');
+      const t = await nbConnect(rec.id, h => log(h));
+      const c = new NbCrypto(rec.name || 'ZT3'); await c.ready; await c.setRandomAppData(fromHex(hex)); c.M = true;
+      const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
+      let conf = false;
+      for (let a = 0; a < 2 && !conf && !t.lost; a++) {
+        await t.send(await c.encrypt(d0), h => log('  ' + h));
+        const ta = Date.now();
+        while (Date.now() - ta < 700 && !conf) {
+          const f = await t.recv(60, h => log('  ' + h)); if (!f) continue;
+          const d = await nbParse(c, f);
+          if (d && d.cmd === 0x5D && d.arg === 1) conf = true;
+          else { const r = await nbOpen0(c.key, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D && r.pt[6] === 1) conf = true; }
+        }
+      }
+      if (conf) {
+        log('\n5D 01 ✓✓ CE SECRET EST STOCKÉ DANS LA TROTTINETTE — adoption et session…');
+        store.set('scooter', { ...rec, random: hex });
+        try { await t.close(); } catch {}
+        await sleep(2000);
+        await sc.connect(false, x => log(x));
+      } else {
+        log('\npas de réponse — ce secret n’est pas celui stocké (ou module BLE coincé : éteins/rallume la trottinette et réessaie)');
+        try { await t.close(); } catch {}
+      }
+    } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || String(e)) + '\n(133 → éteins/rallume la trottinette, attends 10 s)'); }
+  };
 }
 
 // ---------- signalements ----------

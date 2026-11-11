@@ -154,6 +154,14 @@ Rapport v1.4.43 (09:28) par ailleurs : panneau « Mes kilomètres » SANS bouton
 - **v1.4.47 : test A/B dans chaque session** — tentatives 1-2 protocole A (1 appui, laisse allumé), tentatives 3-4 protocole B (bascules). Étiquette « protocole A/B » dans l'en-tête de chaque tentative du rapport. Si A accepte et pas B → la règle 4 du dossier est invalide, le protocole A redevient la norme.
 - Si A et B échouent tous les deux avec le code byte-identique à l'ère des succès : la variable restante est l'ÉTAT de la trottinette (INDEX=1 orphelin, firmware nov. 2026) → réinitialisation d'usine (piste 6).
 
+### 10 sexies. Rapport v1.4.46 (11:06) — **7ᵉ ACCEPTATION** (la 1ʳᵉ depuis le 11/08) + l'outil pour trancher
+
+- **`← 5C 01 : ACCEPTÉ ✓ (après 4 envois)`** — ack arrivé APRÈS l'o1 #4, déchiffré sous la clé courante `SHA1(nom‖jeton)` (ctr SN 2). Même forme d'ack que les illisibles → **hypothèse révisée** : les `5C 00` (en attente) sont probablement chiffrés sous une clé dérivée du secret *proposé* (inconnu de nous pendant la fenêtre), les `5C 01` (acceptation) sous la clé courante. Ça expliquerait pourquoi les acks « illisibles » ne cèdent à RIEN offline.
+- Geste = bascules (protocole B) → **B peut aussi accepter** (le geste n'est donc pas le verrou unique ; confound possible : les 24 trames de reprise à froid envoyées AVANT l'étape 1 sur cette connexion).
+- La reprise post-acceptation a mangé **2× GATT 133** (reprises à +3 s/+7 s après ~60 trames — trop vite). **Échec SANS portée cryptographique.** 1.4.48 : pauses 6 s puis 15 s.
+- **Ambiguïté** : l'ack peut répondre à l'o1 #3 (`22b21066a8673029beb07d39657cd4de`) ou #4 (`33a3ac96cfee82775fbe4851a2238f00` — celui sauvegardé par l'app). **1.4.48 ajoute 🧪 « Tester un secret »** (panneau → Outils de diagnostic) : colle un hex de rapport → test à froid Q0 → 5D 01 = c'est LE secret stocké → adoption + session. C'est l'outil qui tranchera le 50/50.
+- 1.4.48 : les secrets d'une fenêtre avec acceptation sont AUSSI poussés dans `trotti.o1cand` (avant : seulement ack illisible) — une future reprise à froid les couvrira.
+
 ---
 
 *Dossier rédigé par ZCode (GLM-5.3) avec Billel, 2026-11-08, mis à jour le 2026-11-11. Bonne chance à la prochaine IA — on est très proches : l'appairage marche, il ne reste que la lecture.* 🛴
