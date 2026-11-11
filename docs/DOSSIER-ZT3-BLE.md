@@ -138,6 +138,13 @@ Autres ajouts 1.4.44 : synchro du compteur SN entre candidats de dissection (ant
 
 Rapport v1.4.43 (09:28) par ailleurs : panneau « Mes kilomètres » SANS bouton « Connecter » → le téléphone n'a pas de secret stocké → le secret INDEX=1 côté trottinette est ORPHELIN (aucun appareil ne le connaît). Si la 1.4.44 ne le récupère pas (reprise-candidats ou dissection), réinitialisation d'usine (piste 6) devient le chemin le plus rationnel.
 
+### 10 quater. Rapport v1.4.44 (10:27) : trames enfin bien formées → toujours muet, mais un chemin jamais testé identifié
+
+- Avec les len corrigés : reprise-candidats (même connexion), dissection (SN compteurs distincts 0004-0013 ✓ anti-rejeu réparé), matrice 0x5D, lectures — **TOUT reste muet**. L'ack `…0002` reste la SEULE réponse (systématique après l'o1 #3, 3/3 tentatives).
+- **Découverte en relisant le flot** : `etape1()` s'exécute TOUJOURS avant le bloc reprise → la « reprise SHU authentique » de la 1.4.37 (clé `SHA1(secret‖zéros)`, SANS jeton) **n'a jamais réellement tourné sans jeton** — le jeton de l'étape 1 était déjà en place, donc la clé était `SHA1(secret‖jeton)`. Le chemin Q0 « connexion vierge + secret‖zéros » restait **inexploré**.
+- **v1.4.45** : les secrets o1 de chaque fenêtre avec ack illisible sont stockés (`trotti.o1cand`, 12 max) et, à la tentative suivante, testés **À FROID** : connexion fraîche, pas d'étape 1, `0x5D` cpt0 sous `SHA1(secret‖zéros)`, instance fraîche par candidat. Si l'ack illisible est un « secret ENREGISTRÉ », un candidat répondra `5D 01` → secret récupéré, session directe, plus besoin d'appairer.
+- **Pattern GATT 133 confirmé** : 2ᵉ session consécutive qui meurt à la 4ᵉ connexion — le module BLE de la trottinette se coince après ~3 connexions. **Power-cycle obligatoire avant chaque session de test.**
+
 ---
 
 *Dossier rédigé par ZCode (GLM-5.3) avec Billel, 2026-11-08, mis à jour le 2026-11-11. Bonne chance à la prochaine IA — on est très proches : l'appairage marche, il ne reste que la lecture.* 🛴

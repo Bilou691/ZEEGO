@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.44';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.45';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -769,9 +769,10 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     log(c.O ? 'étape 3 ✓ appariement complet (5D 01)' : 'étape 3 sans réponse');
   };
   if (resume) {
-    // REPRISE SHU AUTHENTIQUE (Q0) : PAS d'étape 1 — clé = SHA1(secret ‖ zéros16), 0x5D cpt0 avec challenge vide
-    await c.setRandomAppData(fromHex(resume)); c.M = true; // jeton = zéros à ce stade → clé = SHA1(secret ‖ zéros)
-    log('reprise SHU : 0x5D cpt0 (challenge zéro, clé secret‖zéros)…');
+    // Reprise par jeton (la clé est SHA1(secret‖jeton) : l'étape 1 a déjà rempli le jeton ci-dessus —
+    // la vraie reprise Q0 « secret‖zéros SANS étape 1 » est testée à froid dans blePair, connexion vierge)
+    await c.setRandomAppData(fromHex(resume)); c.M = true;
+    log('reprise : 0x5D cpt0 (challenge zéro, clé secret‖jeton)…');
     // FIX 1.4.44 : cette trame partait SANS en-tête 5A A5 et avec len=0 malgré 14 octets de payload —
     // la trottinette ne pouvait pas la comprendre (le comparaison avec l'o1, qui marche, l'a révélé)
     const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
@@ -829,6 +830,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
   }
   if (!mFlag) { // jeton + secrets en clair dans le rapport : l'analyse hors-ligne ne dépend plus d'une nouvelle session
     log('jeton : ' + toHex(c.token) + ' · secrets proposés : ' + envoyes.join(' '));
+    if (ackIllisible) store.set('o1cand', [...new Set([...store.get('o1cand', []), ...envoyes])].slice(-12)); // la reprise À FROID de la prochaine tentative les testera (Q0, sans étape 1)
     if (!ackIllisible) throw new Error('pas de 5C 01 sur cette connexion');
     // L'ack « …0002 » est indéchiffrable (clé inconnue — probablement le secret INDEX=1), MAIS s'il s'agit
     // d'un 5C 01 chiffré sous le secret retenu, une LECTURE sous ce secret répondra. La dissection qui suit
@@ -836,10 +838,11 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     log('⏺ ' + ackIllisible + ' ack' + (ackIllisible > 1 ? 's' : '') + ' illisible' + (ackIllisible > 1 ? 's' : '') + ' reçu' + (ackIllisible > 1 ? 's' : '') + ' — dissection quand même : si un secret a été retenu, une lecture batterie répondra');
   }
   // REPRISE-CANDIDATS : l'ack illisible signifiait peut-être « secret ENREGISTRÉ » (pas « accepté »).
-  // La reprise SHU (clé SHA1(secret‖zéros), 0x5D cpt0 challenge vide) n'utilise PAS le jeton →
-  // testable dans la MÊME connexion, une instance fraîche par candidat (compteur 0 → cpt0).
+  // Instance fraîche par candidat (jeton = zéros → clé SHA1(secret‖zéros), compteur 0 → cpt0).
+  // ⚠ Limite constatée le 11/11 : sur une connexion où l'étape 1 a déjà eu lieu, ce test reste muet —
+  // la version probante est la reprise À FROID (connexion vierge), faite dans blePair.
   if (!mFlag && ackIllisible && !t.lost) {
-    log('reprise-candidats : 0x5D cpt0 sous SHA1(secret‖zéros) pour chaque secret envoyé…');
+    log('reprise-candidats (même connexion — le vrai test est à froid à la prochaine tentative)…');
     const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
     for (let i = envoyes.length - 1; i >= 0 && !c.O && !t.lost; i--) {
       const c2 = new NbCrypto(c.name); // jeton = zéros : la clé ne dépend que du secret
@@ -1155,6 +1158,36 @@ async function blePair() {
       }
       try {
         t = await nbConnect(id, h => log(h));
+        // REPRISE À FROID D'ABORD (Q0 authentique) : connexion vierge, SANS étape 1 → la clé
+        // SHA1(secret‖zéros) n'existe qu'avant tout 5B. Ce chemin n'avait encore JAMAIS été
+        // testé sur le fil (etape1() tournait toujours avant le bloc reprise). Si l'ack illisible
+        // des sessions précédentes était un « secret ENREGISTRÉ », un de ces candidats répondra 5D 01.
+        const cands = essai === 1 ? store.get('o1cand', []) : [];
+        for (let i = 0; i < cands.length && !ok && !t.lost; i++) {
+          const cr = new NbCrypto(name); await cr.ready; await cr.setRandomAppData(fromHex(cands[i])); cr.M = true;
+          const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
+          let conf = false;
+          for (let a = 0; a < 2 && !conf && !t.lost; a++) {
+            await t.send(await cr.encrypt(d0), l => log('  ' + l));
+            const ta = Date.now();
+            while (Date.now() - ta < 700 && !conf) {
+              const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+              const d = await nbParse(cr, f);
+              if (d && d.cmd === 0x5D && d.arg === 1) conf = true;
+              else { const r = await nbOpen0(cr.key, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D && r.pt[6] === 1) conf = true; }
+            }
+          }
+          log(conf ? `← 5D 01 À FROID ✓✓ le secret ${cands[i].slice(0, 8)}… est bien celui stocké dans la trottinette` : `  candidat ${i + 1}/${cands.length} (à froid) : rien`);
+          if (conf) { // secret récupéré : session en direct immédiatement, plus besoin d'appairer
+            store.set('scooter', { name, id, random: cands[i] }); store.del('o1cand');
+            log('secret récupéré — session en direct…');
+            await sc.stop(); sc.t = t; sc.c = cr; sc.state = 'live'; sc.swept = false; sc.render(); sc.startLoop(); await sc.poll();
+            t = null; ok = true;
+            log('\nC’est prêt : les infos s’affichent dans « Mes kilomètres » et pendant tes trajets 🛴');
+          }
+        }
+        if (cands.length && !ok) log('reprise à froid : aucun candidat confirmé — appairage normal…');
+        if (!ok) {
         const c = new NbCrypto(name);
         const invite = '\n⏺ MAINTENANT : bascule le PHARE en rythme (ON/OFF/ON/OFF…) toutes les 1-2 s, sans t’arrêter, jusqu’à « ACCEPTÉ ». Le geste qui a marché : des bascules répétées pendant toute la fenêtre — pas un seul appui.\n';
         await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) })); // le secret est sauvé DÈS le 5C 01
@@ -1185,6 +1218,7 @@ async function blePair() {
         }
         ok = true;
         log('\nC’est prêt : les infos s’affichent dans « Mes kilomètres » et pendant tes trajets 🛴');
+        }
       } catch (e) {
         const msg = e && (e.message || e.errorMessage) || String(e);
         log('\nÉchec : ' + msg);
