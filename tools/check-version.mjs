@@ -10,7 +10,6 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fail = msg => { console.error('✗ ' + msg); process.exit(1); };
-const sha = s => createHash('sha256').update(s, 'utf8').digest('hex');
 
 let vJson;
 try {
@@ -20,6 +19,9 @@ if (!/^\d+\.\d+\.\d+$/.test(vJson.v || '')) fail(`version.json : « v » absent 
 
 const appJs = readFileSync(join(root, 'www', 'app.js'), 'utf8');
 const styleCss = readFileSync(join(root, 'www', 'style.css'), 'utf8');
+// Le bundle est servi en LF (raw.githubusercontent + WebView) : on hashe la version normalisée,
+// sinon Windows (CRLF en copie de travail) et la CI (LF) calculeraient des sha différents.
+const sha = s => createHash('sha256').update(s.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
 const vLine = appJs.split('\n').find(l => l.includes('const V ='));
 if (!vLine) fail('app.js : ligne `const V =` introuvable');
 const m = vLine.match(/\|\|\s*'(\d+\.\d+\.\d+)'/);
