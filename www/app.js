@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.46';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.47';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -1152,7 +1152,7 @@ async function blePair() {
     let ok = false, coldDone = false; // la reprise à froid doit partir dès la 1re connexion QUI S'ÉTABLIT (les 133 peuvent manger les premières tentatives)
     for (let essai = 1; essai <= 4 && !ok; essai++) { // jusqu'à 4 connexions fraîches — 4 o1 max par connexion (limite firmware ~5)
       if (essai > 1) { // avant : 1,5 s seulement → le phare restait allumé et la tentative était condamnée d'office (règle 4 du dossier)
-        log(`\n— tentative ${essai}/4 — ÉTEINS le phare (1 appui sur le bouton de la trottinette), attends 2 s, puis valide ci-dessous —`);
+        log(`\n— tentative ${essai}/4 (protocole ${essai <= 2 ? 'A · 1 appui laisse allumé' : 'B · bascules rythmées'}) — ÉTEINS le phare, attends 2 s, puis valide ci-dessous —`);
         await waitBtn(m, '#bleNext');
         await sleep(1500);
       }
@@ -1192,7 +1192,12 @@ async function blePair() {
         if (cands.length && !ok) log('reprise à froid : aucun candidat confirmé — appairage normal…');
         if (!ok) {
         const c = new NbCrypto(name);
-        const invite = '\n⏺ MAINTENANT : bascule le PHARE en rythme (ON/OFF/ON/OFF…) toutes les 1-2 s, sans t’arrêter, jusqu’à « ACCEPTÉ ». Le geste qui a marché : des bascules répétées pendant toute la fenêtre — pas un seul appui.\n';
+        // A/B geste (archéologie git 11/11 : le chemin pré-acceptation est IDENTIQUE octet par octet
+        // à la 1.4.38 des 6 acceptations — seule l'invite, donc le GESTE, diffère depuis 1.4.42).
+        // Protocole A = le texte affiché PENDANT les 6 acceptations (« 1 appui puis laisse allumé »).
+        const invite = essai <= 2
+          ? '\n⏺ Protocole A (celui des 6 acceptations) : phare ÉTEINT maintenant. Dès cet instant : UN SEUL appui (le phare s’allume) puis N’Y TOUCHE PLUS — laisse-le ALLUMÉ jusqu’à « ACCEPTÉ ».\n'
+          : '\n⏺ Protocole B (contrôle) : bascule le PHARE en rythme ON/OFF toutes les 1-2 s, sans t’arrêter, jusqu’à « ACCEPTÉ ».\n';
         await nbHandshake(t, c, null, l => log('  ' + l), () => log(invite), null, () => store.set('scooter', { name, id, random: toHex(c.random) })); // le secret est sauvé DÈS le 5C 01
         store.set('scooter', { name, id, random: toHex(c.random) }); // le secret est accepté : on le retient tout de suite
         // La connexion d'appairage ne sert JAMAIS les lectures (constaté sur 5 sessions) —
