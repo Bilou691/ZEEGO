@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.49';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.50';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -167,6 +167,9 @@ function startWatch() {
   if (watchId == null) watchId = navigator.geolocation.watchPosition(onFix,
     e => { if (e.code === 1) toast('Autorise la localisation pour utiliser Trotti'); else if (Date.now() - (startWatch.w || 0) > 30000) { startWatch.w = Date.now(); toast('GPS : signal faible'); } },
     { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+}
+function stopWatch() { // app en arrière-plan hors trajet : le GPS haute précision coûte la batterie pour rien
+  if (watchId != null && !ride.active) { navigator.geolocation.clearWatch(watchId); watchId = null; }
 }
 const waitFix = ms => new Promise(r => { const t0 = Date.now(), i = setInterval(() => { if (me || Date.now() - t0 > ms) { clearInterval(i); r(); } }, 150); });
 function setFollow(v) { follow = v; $('locate').classList.toggle('on', v); }
@@ -352,7 +355,10 @@ async function wake(on) {
     else if (wl) { wl.release(); wl = null; }
   } catch {}
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && ride.active) wake(true); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { if (ride.active) wake(true); startWatch(); }
+  else stopWatch(); // hors trajet : GPS coupé en arrière-plan — pendant un trajet il continue (compteur km)
+});
 
 function startRide(mode) {
   if (ride.active) return;
@@ -1342,7 +1348,7 @@ function loadReports() {
   return [...cache, ...local].filter(r => REPORT_TYPES[r.type] && Date.now() - r.t < CFG.reportTtlH * 3600e3);
 }
 async function fetchReports() {
-  if (!CFG.server) return;
+  if (!CFG.server || document.hidden) return; // pas de polling en arrière-plan (batterie)
   const b = map.getBounds(), bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
   try { cache = await (await fetch(`${CFG.server}/api/reports?bbox=${bbox}`)).json(); renderReports(); } catch {}
 }

@@ -9,7 +9,7 @@ const FR = { minLat: 41, maxLat: 51.5, minLng: -5.5, maxLng: 10 }; // France + C
 
 let reports = [];
 try { reports = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch {}
-const save = () => fs.writeFile(FILE, JSON.stringify(reports), () => {});
+const save = () => fs.writeFile(FILE + '.tmp', JSON.stringify(reports), () => fs.rename(FILE + '.tmp', FILE, () => {})); // atomique : un crash en pleine écriture ne peut plus corrompre reports.json
 const purge = () => { const n = Date.now(); reports = reports.filter(r => n - r.t < TTL); };
 
 const hits = new Map(); // limite : 20 signalements / heure / IP
@@ -18,6 +18,10 @@ function limited(ip) {
   if (a.length >= 20) return true;
   a.push(n); hits.set(ip, a); return false;
 }
+setInterval(() => { // purge : les IPs vues une fois ne restaient pas dans la Map pour toujours
+  const n = Date.now();
+  hits.forEach((a, ip) => { const f = a.filter(t => n - t < 3600e3); f.length ? hits.set(ip, f) : hits.delete(ip); });
+}, 300000);
 const dist = (a, b, c, d) => Math.hypot((a - c) * 111000, (b - d) * 75000);
 
 function send(res, code, body) {

@@ -1,6 +1,8 @@
 # Dossier ZT3 Pro — intégration Bluetooth dans Trotti
 
 > **Journal de bord pour la prochaine IA.** Écrit le 2026-11-08 après ~12 h de reverse-engineering et ~20 sessions terrain avec la trottinette réelle. Tout ce qui est noté ici a été **prouvé sur le fil** ou **vérifié par décompilation**, sauf mention contraire. Lire ce dossier AVANT de toucher au code.
+>
+> **⚠ ÉTAT : GELÉ le 2026-11-11 sur décision de Billel** — 9 itérations terrain supplémentaires (v1.4.41→1.4.49, §10 à §10 septies) sans lecture possible : l'étape 3 (0x5D) et les lectures n'ont JAMAIS répondu sur ce firmware (nov. 2026), même avec des trames corrigées byte-exactes et une acceptation fraîche (la 7ᵉ, 11:06). Le code (lecture seule) reste en sommeil dans `www/app.js` — il ne fait rien tant qu'aucune trottinette n'est associée. Pour reprendre : partir des §10-10 septies (le journal le plus à jour) et de la piste 5 (`adb logcat -s ToothSErvice` pendant un appairage SHU réel).
 
 ## 1. Objectif
 
