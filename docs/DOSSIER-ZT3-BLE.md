@@ -120,6 +120,24 @@ Rapport d'association de 08:35 (4 connexions fraîches, o1 cpt0 à secrets uniqu
 - **Trois bugs v1.4.42 trouvés en analysant pourquoi nbTryDecode n'a rien loggé** : (1) une trame au cmd garbage « parse » structurellement → jetée en silence sans forçage ; (2) nbTryDecode rejetait les trames < 15 octets or ces acks en font 13 ; (3) motif de cmd décalé d'un octet (`out[i+2]` au lieu de `out[i+1]`). Tous corrigés en v1.4.43.
 - **Stratégie v1.4.43 — les lectures sont le juge de paix** : ack illisible reçu → on ne jette PLUS la connexion ; on lance quand même la dissection (lecture batterie sous la clé de session de CHAQUE secret envoyé + courante + initiale, formats SN et cpt0). Si l'ack était un 5C 01 chiffré sous le secret retenu, **une lecture répondra** → secret identifié + sauvegardé + session établie, sans jamais lire l'ack. Si rien ne répond (ni lecture ni 5D) → échec honnête, la fenêtre ne s'est pas ouverte.
 
+### 10 ter. BUG DE LONGUEUR SYSTÉMIQUE découvert le 2026-11-11 (rapports v1.4.43) — invalide §3 en partie
+
+En comparant les trames `→` du rapport v1.4.43 octet par octet avec l'o1 (le SEUL format qui marche), un bug historique est apparu : **l'octet de longueur (3ᵉ octet, nb de payload) était FAUX sur toutes les sondes construites à la main** :
+
+| Trame | len envoyé | payload réel | corrigé en 1.4.44 |
+|---|---|---|---|
+| étape 1 `5B` (MARCHE) | 0x00 | 0 o | ✓ était bon |
+| o1 `5C`+secret (MARCHE, 6 acceptations) | 0x10 | 16 o | ✓ était bon |
+| lecture cpt0 `01 55 02` | **0x02** | 1 o | **0x01** (faux depuis 1.4.23) |
+| 0x5D cpt0 + challenge | **0x00** | 14 o | **0x0E** (faux depuis 1.4.25) |
+| reprise SHU 0x5D | en-tête **absent** + len 0 | 14 o | **5A A5 0E** (faux depuis 1.4.37) |
+
+**Conséquence : « étape 3 muette » et « lectures muettes » (§3) ont été conclues sur des trames que la trottinette ne pouvait pas parser.** Ces conclusions sont à réévaluer avec la 1.4.44. Les règles 1/2/3/5/6/7 (crypto, acceptation, compteur) restent valides — elles portaient sur l'étape 1 et l'o1, qui étaient bien formés.
+
+Autres ajouts 1.4.44 : synchro du compteur SN entre candidats de dissection (anti-rejeu, leçon 1.4.27 — chaque candidat repartait au même compteur), et **reprise-candidats** : après un ack illisible, 0x5D cpt0 sous SHA1(secret‖zéros) pour CHAQUE secret envoyé (cette clé n'utilise pas le jeton → testable dans la même connexion, instance fraîche par candidat). Si l'ack illisible était un « secret ENREGISTRÉ » plutôt qu'un « accepté », c'est ce test qui le révélera.
+
+Rapport v1.4.43 (09:28) par ailleurs : panneau « Mes kilomètres » SANS bouton « Connecter » → le téléphone n'a pas de secret stocké → le secret INDEX=1 côté trottinette est ORPHELIN (aucun appareil ne le connaît). Si la 1.4.44 ne le récupère pas (reprise-candidats ou dissection), réinitialisation d'usine (piste 6) devient le chemin le plus rationnel.
+
 ---
 
 *Dossier rédigé par ZCode (GLM-5.3) avec Billel, 2026-11-08, mis à jour le 2026-11-11. Bonne chance à la prochaine IA — on est très proches : l'appairage marche, il ne reste que la lecture.* 🛴

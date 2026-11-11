@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.43';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.44';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -772,7 +772,9 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     // REPRISE SHU AUTHENTIQUE (Q0) : PAS d'étape 1 — clé = SHA1(secret ‖ zéros16), 0x5D cpt0 avec challenge vide
     await c.setRandomAppData(fromHex(resume)); c.M = true; // jeton = zéros à ce stade → clé = SHA1(secret ‖ zéros)
     log('reprise SHU : 0x5D cpt0 (challenge zéro, clé secret‖zéros)…');
-    const d0 = Uint8Array.from([0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
+    // FIX 1.4.44 : cette trame partait SANS en-tête 5A A5 et avec len=0 malgré 14 octets de payload —
+    // la trottinette ne pouvait pas la comprendre (le comparaison avec l'o1, qui marche, l'a révélé)
+    const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
     for (let a = 0; a < 3 && !c.O && !t.lost; a++) {
       await t.send(await c.encrypt(d0), l => log('  ' + l)); // compteur 0 → format cpt0, comme le vrai SHU
       const ta = Date.now();
@@ -833,6 +835,34 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     // est notre juge de paix : lectures sous chaque secret envoyé → si l'une répond, la session est établie.
     log('⏺ ' + ackIllisible + ' ack' + (ackIllisible > 1 ? 's' : '') + ' illisible' + (ackIllisible > 1 ? 's' : '') + ' reçu' + (ackIllisible > 1 ? 's' : '') + ' — dissection quand même : si un secret a été retenu, une lecture batterie répondra');
   }
+  // REPRISE-CANDIDATS : l'ack illisible signifiait peut-être « secret ENREGISTRÉ » (pas « accepté »).
+  // La reprise SHU (clé SHA1(secret‖zéros), 0x5D cpt0 challenge vide) n'utilise PAS le jeton →
+  // testable dans la MÊME connexion, une instance fraîche par candidat (compteur 0 → cpt0).
+  if (!mFlag && ackIllisible && !t.lost) {
+    log('reprise-candidats : 0x5D cpt0 sous SHA1(secret‖zéros) pour chaque secret envoyé…');
+    const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
+    for (let i = envoyes.length - 1; i >= 0 && !c.O && !t.lost; i--) {
+      const c2 = new NbCrypto(c.name); // jeton = zéros : la clé ne dépend que du secret
+      await c2.ready; await c2.setRandomAppData(fromHex(envoyes[i])); c2.M = true;
+      let conf = false;
+      for (let a = 0; a < 2 && !conf && !t.lost; a++) {
+        await t.send(await c2.encrypt(d0), l => log('  ' + l));
+        const ta = Date.now();
+        while (Date.now() - ta < 700 && !conf) {
+          const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
+          const d = await nbParse(c2, f);
+          if (d && d.cmd === 0x5D && d.arg === 1) conf = true;
+          else { const r = await nbOpen0(c2.key, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D && r.pt[6] === 1) conf = true; }
+        }
+      }
+      log(conf ? `  ← 5D 01 : le secret o1 #${i + 1} EST ENREGISTRÉ sur la trottinette ✓` : `  secret o1 #${i + 1} : pas de reprise`);
+      if (conf) { // ce secret est stocké côté trottinette : on l'adopte tout de suite
+        await c.setRandomAppData(fromHex(envoyes[i])); c.M = true; c.O = true;
+        onAccepted && onAccepted(envoyes[i]);
+        log('secret enregistré identifié ✓ — la dissection confirmera la clé de lecture');
+      }
+    }
+  }
   // DISSECTION DE LA CLÉ : quel secret envoyé la trottinette a-t-elle retenu ?
   const keyPre = await nbKey(c.name, c.token); // clé courante nom‖jeton
   const keyInit = await nbKey(c.name, NB_FW); // clé initiale nom‖sel
@@ -847,7 +877,8 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     for (const fmt of ['sn', 'cpt0']) {
       await t.send(fmt === 'sn'
         ? await nbWrap(cc, 0x16, 0x01, 0x55, Uint8Array.from([2]))
-        : await nbSeal0(kSess, Uint8Array.from([0x5A, 0xA5, 0x02, 0x3E, 0x16, 0x01, 0x55, 0x02])), l => log('  ' + l));
+        : await nbSeal0(kSess, Uint8Array.from([0x5A, 0xA5, 0x01, 0x3E, 0x16, 0x01, 0x55, 0x02])), l => log('  ' + l)); // len=01 : le payload fait 1 octet (bug 02 depuis 1.4.23)
+      if (cc !== c) c.counter = Math.max(c.counter, cc.counter); // anti-rejeu : le compteur SN ne doit jamais reculer entre candidats (leçon 1.4.27)
       const ta = Date.now(); let p = null;
       while (Date.now() - ta < 800 && !p) {
         const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
@@ -855,6 +886,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
         if (!p) { const r = await nbOpen0(kSess, f); if (r.ok && r.pt[5] === 0x04) p = r.pt.slice(7); }
         if (p) log(`  ← RÉPONSE [${essaisNoms[i]} · ${fmt}] : ${(toHex(p).match(/../g) || []).join(' ')}`);
       }
+      if (cc !== c) c.counter = Math.max(c.counter, cc.counter); // réceptions incluses : le compteur ne recule jamais
       if (p) { trouve = essaisCle[i]; break; }
     }
     if (trouve) break;
@@ -883,7 +915,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
     for (let a = 0; a < 2 && !c.O && !t.lost; a++) {
       await t.send(fmt === 'sn'
         ? await nbWrap(cc, 0x04, 0x5D, 0x00, c.challenge)
-        : await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x00, 0x3E, 0x04, 0x5D, 0x00, ...c.challenge])), l => log('  ' + l));
+        : await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...c.challenge])), l => log('  ' + l));
       const ta = Date.now();
       while (Date.now() - ta < 700 && !c.O) {
         const f = await t.recv(60, l => log('  ' + l)); if (!f) continue;
@@ -891,6 +923,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
         if (!d && fmt === 'cpt0') { const r = await nbOpen0(cle, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D) { c.O = true; c.M = true; log('  ← 5D ' + r.pt[6] + ' déchiffré (cpt0 ' + lab + ') ✓'); } }
         if (!c.O && d && d.cmd === 0x5D && d.arg === 1) { c.O = true; log('  ← 5D 01 déchiffré (' + lab + ') ✓'); }
       }
+      if (cc !== c) c.counter = Math.max(c.counter, cc.counter); // anti-rejeu ici aussi
     }
     if (c.O) { log('étape 3 ✓ appariement complet — LA BONNE COMBINAISON ÉTAIT : ' + lab); break; }
   }
@@ -913,7 +946,7 @@ async function nbHandshake(t, c, resume, log, onButton, variant, onAccepted) {
       log('essai lecture batterie · ' + lab + '…');
       const cc = Object.assign(Object.create(c), { key: cle });
       await t.send(fmt === 'cpt0'
-        ? await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x02, 0x3E, board, 0x01, 0x55, 0x02]))
+        ? await nbSeal0(cle, Uint8Array.from([0x5A, 0xA5, 0x01, 0x3E, board, 0x01, 0x55, 0x02])) // len=01 : payload 1 octet (bug 02 depuis 1.4.23)
         : await nbWrap(cc, board, 0x01, 0x55, Uint8Array.from([2])), l => log('  ' + l));
       const t0 = Date.now(); let vu = null;
       while (Date.now() - t0 < 900 && !vu) {
