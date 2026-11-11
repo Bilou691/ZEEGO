@@ -43,6 +43,10 @@ Bouton « calques » : snacks/fast-food, restos/cafés/boulangeries, réparateur
 
 ## Itinéraire
 
-Moteur Valhalla (profil vélo) réglé trottinette : trajet le plus **rapide**, trafic ignoré (`use_roads` 0,85), pas de contrainte de pente,
-pavés évités, jamais d'autoroute ni de trottoir, sens interdits respectés. Secours : OSRM vélo.
-Les signalements « piste bloquée » et « travaux » sont évités automatiquement.
+Moteur Valhalla (profil vélo), deux profils au choix via les puces dans la fiche itinéraire :
+- **🛡 Sécurisé** (défaut) : pistes et voies cyclables en priorité (`use_roads` 0,25), pavés lourdement pénalisés —
+  les grandes routes sans aménagement ne sont prises qu'en dernier recours.
+- **⚡ Rapide** : le plus court en temps, trafic ignoré (`use_roads` 0,85).
+
+Pas de contrainte de pente (trottinette électrique), jamais d'autoroute ni de trottoir, sens interdits respectés. Secours : OSRM vélo.
+Les signalements « piste bloquée », « travaux » et « danger » sont évités automatiquement.

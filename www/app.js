@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.40';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.41';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -128,6 +128,7 @@ const fmtDist = m => m < 1000 ? Math.max(10, Math.round(m / 10) * 10) + ' m' : (
 const fmtTime = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}:${pad(m)}` : `${m}:${pad(s % 60)}`; };
 const fmtClock = t => { const d = new Date(t); return `${d.getHours()}h${pad(d.getMinutes())}`; };
 const avgSpeed = () => +store.get('avg', 20);
+let routeMode = store.get('rmode', 'safe') === 'fast' ? 'fast' : 'safe'; // défaut : sécurisé
 
 function setState(s) {
   document.body.dataset.s = s;
@@ -230,11 +231,17 @@ map.on('touchstart', e => { if (e.points.length === 1) press = setTimeout(() => 
 ['touchend', 'touchmove', 'touchcancel', 'dragstart', 'zoomstart'].forEach(ev => map.on(ev, () => clearTimeout(press)));
 
 // ---------- itinéraire trottinette ----------
-// Profil « vélo » de Valhalla réglé pour une trottinette : on cherche le trajet le plus RAPIDE.
-//  - use_roads 0,85 : le trafic ne gêne pas (on se faufile sur le côté), on ne détourne pas pour une piste
-//  - use_hills 1 : trottinette électrique, les côtes ne comptent pas
-//  - avoid_bad_surfaces 0,5 : petites roues, on évite pavés et chemins défoncés
-//  - jamais d'autoroute, ni de trottoir/escalier ; sens interdits respectés (comme la loi)
+// Profil « vélo » de Valhalla, deux réglages au choix (puces dans la fiche itinéraire) :
+//  - SÉCURISÉ (défaut) : use_roads 0,25 = la préférence naturelle de Valhalla — pistes et voies
+//    cyclables d'abord ; une grande route SANS aménagement n'est prise qu'en dernier recours.
+//    avoid_bad_surfaces 0,75 : petites roues → pavés et chemins défoncés lourdement pénalisés.
+//    Testé à Lyon : à distance égale (+2 % de temps), passe par les Voies Lyonnaises au lieu de rues ordinaires.
+//  - RAPIDE : l'ancien réglage (use_roads 0,85, trafic ignoré, on se faufile sur le côté).
+//  use_hills 1 : trottinette électrique, les côtes ne comptent pas.
+//  use_living_streets : sans effet au-dessus de 0,5 (doc Valhalla) — on garde la valeur par prudence.
+//  Jamais d'autoroute, ni de trottoir/escalier ; sens interdits respectés (comme la loi).
+const OPT_FAST = { use_roads: .85, use_hills: 1, avoid_bad_surfaces: .5, use_living_streets: .6 };
+const OPT_SAFE = { use_roads: .25, use_hills: 1, avoid_bad_surfaces: .75, use_living_streets: .6 };
 const decode6 = s => {
   let i = 0, lat = 0, lng = 0; const out = [];
   while (i < s.length) {
@@ -250,12 +257,12 @@ const decode6 = s => {
 const clean = t => String(t || '').replace(/P[ée]dalez/g, 'Roulez').replace(/p[ée]dalez/g, 'roulez').replace(/cycliste/g, 'trottinette').replace(/\.$/, '');
 function excludePoints(a, b) {
   const x0 = Math.min(a[0], b[0]) - .02, x1 = Math.max(a[0], b[0]) + .02, y0 = Math.min(a[1], b[1]) - .02, y1 = Math.max(a[1], b[1]) + .02;
-  return loadReports().filter(r => (r.type === 'blocked' || r.type === 'works') && r.lng > x0 && r.lng < x1 && r.lat > y0 && r.lat < y1).slice(0, 20).map(r => [r.lng, r.lat]);
+  return loadReports().filter(r => (r.type === 'blocked' || r.type === 'works' || r.type === 'danger') && r.lng > x0 && r.lng < x1 && r.lat > y0 && r.lat < y1).slice(0, 20).map(r => [r.lng, r.lat]);
 }
-async function valhalla(from, to, avg, excl) {
+async function valhalla(from, to, avg, excl, safe) {
   const body = {
     locations: [{ lat: from[1], lon: from[0] }, { lat: to[1], lon: to[0] }], costing: 'bicycle',
-    costing_options: { bicycle: { bicycle_type: 'Hybrid', cycling_speed: avg, use_roads: .85, use_hills: 1, avoid_bad_surfaces: .5, use_living_streets: .6 } },
+    costing_options: { bicycle: { bicycle_type: 'Hybrid', cycling_speed: avg, ...(safe ? OPT_SAFE : OPT_FAST) } },
     directions_options: { language: 'fr-FR', units: 'kilometers' }
   };
   if (excl.length) body.exclude_locations = excl.map(p => ({ lat: p[1], lon: p[0] }));
@@ -271,10 +278,10 @@ async function osrm(from, to, avg) {
   const rt = j.routes[0];
   return { coords: rt.geometry.coordinates, duration: rt.distance / 1000 / avg * 3600 * 1.08, avg, maneuvers: [] };
 }
-async function fetchRoute(from, to, avg) {
+async function fetchRoute(from, to, avg, safe) {
   const ex = excludePoints(from, to); let r;
-  try { r = await valhalla(from, to, avg, ex); }
-  catch { try { r = await valhalla(from, to, avg, []); } catch { r = await osrm(from, to, avg); } }
+  try { r = await valhalla(from, to, avg, ex, safe); }
+  catch { try { r = await valhalla(from, to, avg, [], safe); } catch { r = await osrm(from, to, avg); } }
   r.cum = [0]; for (let i = 1; i < r.coords.length; i++) r.cum[i] = r.cum[i - 1] + dist(r.coords[i - 1], r.coords[i]);
   r.distance = r.cum[r.cum.length - 1];
   return r;
@@ -294,7 +301,7 @@ async function setDest(ll, name) {
 async function computeRoute(fit) {
   const my = ++seq; $('go').style.opacity = .6;
   try {
-    const r = await fetchRoute(me, dest, avgSpeed());
+    const r = await fetchRoute(me, dest, avgSpeed(), routeMode === 'safe');
     if (my !== seq) return;
     route = r; syncRoute(); if (fit) fitRoute(); showSheet(); setState('route'); refreshPois();
   } catch { if (my === seq) toast('Itinéraire introuvable'); }
@@ -313,9 +320,16 @@ function showSheet() {
   const avg = avgSpeed(), min = Math.max(1, Math.round(route.duration * route.avg / avg / 60)), n = reportsNearRoute();
   $('avg').value = avg; $('avgOut').textContent = avg + ' km/h';
   $('routeInfo').innerHTML = `<div class="big">${min}<small>min</small></div><div class="km"><b>${fmtDist(route.distance)}</b><br>arrivée ${fmtClock(Date.now() + min * 60e3)}</div>`;
-  $('chips').innerHTML = `<span class="chip ok">${I.scooter}Trottinette · le plus rapide</span><span class="chip">${I.pin}${esc(destName)}</span>` +
+  const modeChip = (m, label) => `<span class="chip mode ${routeMode === m ? 'ok' : ''}" data-m="${m}" title="${m === 'safe' ? 'Pistes et voies cyclables en priorité' : 'Le trajet le plus court en temps'}">${label}</span>`;
+  $('chips').innerHTML = modeChip('safe', '🛡 Sécurisé') + modeChip('fast', '⚡ Rapide') + `<span class="chip">${I.pin}${esc(destName)}</span>` +
     (n ? `<span class="chip warn">${I.alert}${n} signalement${n > 1 ? 's' : ''}</span>` : '');
 }
+$('chips').addEventListener('click', e => { // bascule Sécurisé / Rapide → recalcule l'itinéraire
+  const b = e.target.closest('[data-m]');
+  if (!b || b.dataset.m === routeMode) return;
+  routeMode = b.dataset.m; store.set('rmode', routeMode);
+  if (me && dest) computeRoute(false); else if (route) showSheet();
+});
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 let avgTimer;
 $('avg').oninput = () => { store.set('avg', +$('avg').value); if (route) showSheet(); clearTimeout(avgTimer); avgTimer = setTimeout(() => dest && me && computeRoute(false), 700); };
@@ -423,7 +437,7 @@ function navUpdate() {
 async function reroute() {
   ride.lastReroute = Date.now(); toast('Recalcul de l’itinéraire…');
   try {
-    const r = await fetchRoute(me, dest, avgSpeed());
+    const r = await fetchRoute(me, dest, avgSpeed(), routeMode === 'safe');
     if (!ride.active) return;
     route = r; ride.idx = 0; ride.off = 0; syncRoute(); navUpdate(); refreshPois();
   } catch { toast('Recalcul impossible'); }
