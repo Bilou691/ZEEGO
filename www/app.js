@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.52';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.53';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -150,22 +150,64 @@ function updatePanel() {
 const ro = new ResizeObserver(updatePanel); ro.observe($('sheet')); ro.observe($('hud'));
 
 // ---------- géolocalisation ----------
+// ---------- curseur de position : interpolation FLUIDE entre les fixes GPS ----------
+// Les fixes arrivent ~1×/s : sans interpolation, le curseur saute et la rotation claque.
+// On anime donc chaque déplacement (position + cap, arc minimal) image par image sur ~l'intervalle
+// entre fixes, et pendant un trajet la caméra suit le curseur interpolé (mouvement continu,
+// au lieu d'un easeTo relancé à chaque fix — l'ancienne source de saccades).
+let meAnim = null, meRaf = 0, meShown = null, meShownHdg = null, lastFixT = 0, lastAcc = null, accMarker = null;
+const meOffset = () => [0, Math.round((innerHeight - ($('hud')?.offsetHeight || 0) - 170) - innerHeight / 2)];
 function makeMe() {
   meEl = document.createElement('div'); meEl.className = 'me'; meEl.innerHTML = '<b></b><i></i>';
   meMarker = new maplibregl.Marker({ element: meEl, rotationAlignment: 'map', pitchAlignment: 'viewport' }).setLngLat(me).addTo(map);
+  meShown = me;
+}
+function updAcc() { // halo de précision GPS : rayon (m) converti en pixels selon le zoom
+  const el = accMarker && accMarker.getElement();
+  if (!me || !lastAcc) { el && (el.style.display = 'none'); return; }
+  if (!accMarker) {
+    const d = document.createElement('div'); d.className = 'acc';
+    accMarker = new maplibregl.Marker({ element: d }).setLngLat(me).addTo(map);
+    meEl.parentNode.insertBefore(d, meEl); // sous le curseur
+  }
+  const mpp = 156543.03392 * Math.cos(me[1] * Math.PI / 180) / 2 ** map.getZoom();
+  const px = Math.min(280, Math.max(12, lastAcc * 2 / mpp));
+  accMarker.getElement().style.cssText = `display:block;width:${px}px;height:${px}px`;
+  accMarker.setLngLat(me);
 }
 function angDiff(a, b) { return ((b - a + 540) % 360) - 180; }
+function meGo() { // (re)démarre l'animation vers le dernier fix reçu
+  cancelAnimationFrame(meRaf);
+  const step = () => {
+    if (!meAnim || !meMarker) return;
+    const k = Math.min(1, (Date.now() - meAnim.t0) / meAnim.dur), e = 1 - (1 - k) ** 2; // easeOutQuad
+    const ll = [meAnim.from[0] + (meAnim.to[0] - meAnim.from[0]) * e, meAnim.from[1] + (meAnim.to[1] - meAnim.from[1]) * e];
+    meMarker.setLngLat(ll); meShown = ll;
+    accMarker && accMarker.setLngLat(ll);
+    if (meAnim.h0 != null) { meShownHdg = meAnim.h0 + angDiff(meAnim.h0, meAnim.h1) * e; meMarker.setRotation(meShownHdg); }
+    if (follow && ride.active) // caméra solidaire du curseur : continu, image par image
+      map.jumpTo({ center: ll, zoom: 17, pitch: 55, bearing: meAnim.h0 != null ? meShownHdg : map.getBearing(), offset: meAnim.off });
+    if (k < 1) meRaf = requestAnimationFrame(step); else meAnim = null;
+  };
+  meRaf = requestAnimationFrame(step);
+}
 function onFix(pos) {
   const c = pos.coords, first = !me;
   me = [c.longitude, c.latitude];
   if (c.heading != null && !isNaN(c.heading) && (c.speed || 0) > 1.2) hdg = hdg == null ? c.heading : (hdg + angDiff(hdg, c.heading) * .6 + 360) % 360;
-  if (!meMarker) makeMe(); else meMarker.setLngLat(me);
+  if (!meMarker) makeMe();
+  const n = Date.now(), dur = Math.min(1100, Math.max(350, lastFixT ? n - lastFixT : 1000));
+  lastFixT = n; lastAcc = c.accuracy || null;
+  meAnim = { from: meShown || me, to: me, t0: n, dur, h0: hdg != null ? (meShownHdg != null ? meShownHdg : hdg) : null, h1: hdg, off: meOffset() };
+  meGo();
   meEl.classList.toggle('hd', hdg != null && ride.active);
-  if (hdg != null) meMarker.setRotation(hdg);
+  updAcc();
   store.set('pos', me);
   if (first && !ride.active) map.flyTo({ center: me, zoom: 15.5, duration: 1200 });
   if (ride.active) trackRide(c, pos.timestamp || Date.now());
 }
+map.on('zoom', () => lastAcc && updAcc()); // le halo (en mètres) doit suivre le zoom
+map.on('zoomstart', e => { if (e.originalEvent && ride.active) setFollow(false); }); // pincement pendant un trajet : on rend la main
 function startWatch() {
   if (!navigator.geolocation) return toast('Géolocalisation indisponible');
   if (watchId == null) watchId = navigator.geolocation.watchPosition(onFix,
@@ -399,7 +441,7 @@ function trackRide(c, now) {
   kmh = kmh == null ? 0 : kmh;
   ride.speed = ride.speed ? ride.speed * .4 + kmh * .6 : kmh;
   if (kmh < 60) ride.max = Math.max(ride.max, kmh);
-  if (follow) map.easeTo({ center: me, zoom: 17, pitch: 55, bearing: hdg != null ? hdg : map.getBearing(), duration: 1000, easing: t => t, offset: [0, Math.round((innerHeight - $('hud').offsetHeight - 170) - innerHeight / 2)] });
+  // (plus d'easeTo ici : la caméra suit le curseur interpolé image par image, cf. meGo)
   if (ride.mode === 'nav') navUpdate();
 }
 function hudTick() {
