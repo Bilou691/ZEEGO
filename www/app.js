@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.45';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.46';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -1149,7 +1149,7 @@ async function blePair() {
     const dev = await BLE.requestDevice({});
     const id = dev.deviceId, name = dev.name || 'ZT3';
     log(`Appareil : ${name}  [${id}]`);
-    let ok = false;
+    let ok = false, coldDone = false; // la reprise à froid doit partir dès la 1re connexion QUI S'ÉTABLIT (les 133 peuvent manger les premières tentatives)
     for (let essai = 1; essai <= 4 && !ok; essai++) { // jusqu'à 4 connexions fraîches — 4 o1 max par connexion (limite firmware ~5)
       if (essai > 1) { // avant : 1,5 s seulement → le phare restait allumé et la tentative était condamnée d'office (règle 4 du dossier)
         log(`\n— tentative ${essai}/4 — ÉTEINS le phare (1 appui sur le bouton de la trottinette), attends 2 s, puis valide ci-dessous —`);
@@ -1158,13 +1158,16 @@ async function blePair() {
       }
       try {
         t = await nbConnect(id, h => log(h));
-        // REPRISE À FROID D'ABORD (Q0 authentique) : connexion vierge, SANS étape 1 → la clé
-        // SHA1(secret‖zéros) n'existe qu'avant tout 5B. Ce chemin n'avait encore JAMAIS été
-        // testé sur le fil (etape1() tournait toujours avant le bloc reprise). Si l'ack illisible
-        // des sessions précédentes était un « secret ENREGISTRÉ », un de ces candidats répondra 5D 01.
-        const cands = essai === 1 ? store.get('o1cand', []) : [];
-        for (let i = 0; i < cands.length && !ok && !t.lost; i++) {
-          const cr = new NbCrypto(name); await cr.ready; await cr.setRandomAppData(fromHex(cands[i])); cr.M = true;
+        // REPRISE À FROID (Q0 authentique) : connexion vierge, SANS étape 1 → la clé
+        // SHA1(secret‖zéros) n'existe qu'avant tout 5B. Si l'ack illisible des sessions
+        // précédentes était un « secret ENREGISTRÉ », un de ces candidats répondra 5D 01.
+        // Du PLUS RÉCENT au plus ancien : le gagnant probable est en tête.
+        // (1.4.45 ratait ce balayage si la tentative 1 mourait en GATT 133 — corrigé.)
+        const cands = coldDone ? [] : store.get('o1cand', []);
+        coldDone = true;
+        for (let ci = 0; ci < cands.length && !ok && !t.lost; ci++) {
+          const cand = cands[cands.length - 1 - ci];
+          const cr = new NbCrypto(name); await cr.ready; await cr.setRandomAppData(fromHex(cand)); cr.M = true;
           const d0 = Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...new Uint8Array(14)]);
           let conf = false;
           for (let a = 0; a < 2 && !conf && !t.lost; a++) {
@@ -1177,9 +1180,9 @@ async function blePair() {
               else { const r = await nbOpen0(cr.key, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D && r.pt[6] === 1) conf = true; }
             }
           }
-          log(conf ? `← 5D 01 À FROID ✓✓ le secret ${cands[i].slice(0, 8)}… est bien celui stocké dans la trottinette` : `  candidat ${i + 1}/${cands.length} (à froid) : rien`);
+          log(conf ? `← 5D 01 À FROID ✓✓ le secret ${cand.slice(0, 8)}… est bien celui stocké dans la trottinette` : `  candidat ${ci + 1}/${cands.length} (à froid, du plus récent) : rien`);
           if (conf) { // secret récupéré : session en direct immédiatement, plus besoin d'appairer
-            store.set('scooter', { name, id, random: cands[i] }); store.del('o1cand');
+            store.set('scooter', { name, id, random: cand }); store.del('o1cand');
             log('secret récupéré — session en direct…');
             await sc.stop(); sc.t = t; sc.c = cr; sc.state = 'live'; sc.swept = false; sc.render(); sc.startLoop(); await sc.poll();
             t = null; ok = true;
