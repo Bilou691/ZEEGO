@@ -162,6 +162,13 @@ Rapport v1.4.43 (09:28) par ailleurs : panneau « Mes kilomètres » SANS bouton
 - **Ambiguïté** : l'ack peut répondre à l'o1 #3 (`22b21066a8673029beb07d39657cd4de`) ou #4 (`33a3ac96cfee82775fbe4851a2238f00` — celui sauvegardé par l'app). **1.4.48 ajoute 🧪 « Tester un secret »** (panneau → Outils de diagnostic) : colle un hex de rapport → test à froid Q0 → 5D 01 = c'est LE secret stocké → adoption + session. C'est l'outil qui tranchera le 50/50.
 - 1.4.48 : les secrets d'une fenêtre avec acceptation sont AUSSI poussés dans `trotti.o1cand` (avant : seulement ack illisible) — une future reprise à froid les couvrira.
 
+### 10 septies. Captures 11:18 (v1.4.48) — 🧪 #3 muet à froid + amélioration de l'outil
+
+- « Connecter » (secret #4 `33a3ac96…`) → état « injoignable » (cause invisible, journal replié — possiblement 133).
+- 🧪 avec #3 (`22b21066…`) : 1ᵉʳ essai GATT 133, 2ᵉ essai connexion propre → 2 trames Q0 à froid → silence.
+- **Faiblesse reconnue** : le chemin Q0-à-froid n'a JAMAIS répondu sur cette trottinette (0 réussite à ce jour) — son silence ne prouve rien sur le secret. Le chemin avec preuves historiques de `5D 01` = **reprise par jeton** (§3 : « la reprise connecte ✓ », ère 1.4.37-38).
+- **1.4.49** : 🧪 teste maintenant les DEUX chemins — Q0 à froid, puis par jeton (étape 1 → `SHA1(secret‖jeton)` → 0x5D en 4 combinaisons SN/cpt0 × challenge-zéros/série). Conclusion honnête : le silence n'exclut pas un module BLE coincé.
+
 ---
 
 *Dossier rédigé par ZCode (GLM-5.3) avec Billel, 2026-11-08, mis à jour le 2026-11-11. Bonne chance à la prochaine IA — on est très proches : l'appairage marche, il ne reste que la lecture.* 🛴

@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.48';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.49';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -1279,6 +1279,48 @@ async function bleTestSecret() {
           else { const r = await nbOpen0(c.key, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D && r.pt[6] === 1) conf = true; }
         }
       }
+      // Phase 2 — PAR JETON (le chemin qui a produit des 5D 01 historiquement, cf. dossier §3) :
+      // étape 1 (jeton frais) puis 0x5D sous SHA1(secret‖jeton) en 4 combinaisons format × challenge.
+      if (!conf) {
+        log('\npas de réponse à froid — test par jeton (étape 1, puis 0x5D sous secret‖jeton)…');
+        try { await t.close(); } catch {}
+        await sleep(1500);
+        try {
+          t = await nbConnect(rec.id, h => log(h));
+          const c2 = new NbCrypto(rec.name || 'ZT3');
+          const s1 = c2.buildGetRandom(0x04);
+          for (let a = 0; a < 3 && !c2.L && !t.lost; a++) {
+            await t.send(await c2.encrypt(s1), h => log('  ' + h));
+            const ta = Date.now();
+            while (Date.now() - ta < 500 && !c2.L) { const f = await t.recv(60, h => log('  ' + h)); if (f) await nbParse(c2, f); }
+            if (!c2.L) await sleep(300);
+          }
+          if (!c2.L) log('étape 1 sans réponse — power-cycle de la trottinette puis réessaie');
+          else {
+            log('étape 1 ✓ jeton reçu — 0x5D sous SHA1(secret‖jeton), 4 combinaisons…');
+            await c2.setRandomAppData(fromHex(hex)); c2.M = true;
+            const z14 = new Uint8Array(14);
+            const probes = [
+              ['SN · challenge zéros', () => nbWrap(c2, 0x04, 0x5D, 0x00, z14)],
+              ['cpt0 · challenge zéros', () => nbSeal0(c2.key, Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...z14]))],
+              ['SN · série', () => nbWrap(c2, 0x04, 0x5D, 0x00, c2.challenge)],
+              ['cpt0 · série', () => nbSeal0(c2.key, Uint8Array.from([0x5A, 0xA5, 0x0E, 0x3E, 0x04, 0x5D, 0x00, ...c2.challenge]))]
+            ];
+            for (const [lab, mk] of probes) {
+              if (conf || t.lost) break;
+              log('0x5D · ' + lab + '…');
+              await t.send(await mk(), h => log('  ' + h));
+              const ta = Date.now();
+              while (Date.now() - ta < 800 && !conf) {
+                const f = await t.recv(60, h => log('  ' + h)); if (!f) continue;
+                const d = await nbParse(c2, f);
+                if (d && d.cmd === 0x5D && d.arg === 1) conf = true;
+                else { const r = await nbOpen0(c2.key, f); if (r.ok && r.pt[4] === 0x3E && r.pt[5] === 0x5D && r.pt[6] === 1) conf = true; }
+              }
+            }
+          }
+        } catch (e) { log('connexion impossible : ' + (e && (e.message || e.errorMessage) || String(e)) + ' — power-cycle puis réessaie'); }
+      }
       if (conf) {
         log('\n5D 01 ✓✓ CE SECRET EST STOCKÉ DANS LA TROTTINETTE — adoption et session…');
         store.set('scooter', { ...rec, random: hex });
@@ -1286,7 +1328,7 @@ async function bleTestSecret() {
         await sleep(2000);
         await sc.connect(false, x => log(x));
       } else {
-        log('\npas de réponse — ce secret n’est pas celui stocké (ou module BLE coincé : éteins/rallume la trottinette et réessaie)');
+        log('\naucune combinaison n’a répondu — ce secret n’est probablement pas celui stocké (mais un module BLE coincé produit le même silence : éteins/rallume la trottinette et réessaie avant de conclure)');
         try { await t.close(); } catch {}
       }
     } catch (e) { log('\nErreur : ' + (e && (e.message || e.errorMessage) || String(e)) + '\n(133 → éteins/rallume la trottinette, attends 10 s)'); }
