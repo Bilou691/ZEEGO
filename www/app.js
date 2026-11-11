@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.54';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.55';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -303,7 +303,9 @@ const decode6 = s => {
   }
   return out;
 };
-const clean = t => String(t || '').replace(/P[ée]dalez/g, 'Roulez').replace(/p[ée]dalez/g, 'roulez').replace(/cycliste/g, 'trottinette').replace(/\.$/, '');
+const clean = t => String(t || '').replace(/P[ée]dalez/g, 'Roulez').replace(/p[ée]dalez/g, 'roulez').replace(/cycliste/g, 'trottinette')
+  .replace(/\b(dans|sur la|au|sur le) ((?:rue|route|avenue|boulevard|chemin|place|allée|quai|cours|passage|pont) [^,.]+)/ig, 'sur $2') // « tournez à droite DANS Rue X » → « SUR Rue X » (Valhalla francise mal, et la voix le lit)
+  .replace(/\.$/, '');
 function excludePoints(a, b) {
   const x0 = Math.min(a[0], b[0]) - .02, x1 = Math.max(a[0], b[0]) + .02, y0 = Math.min(a[1], b[1]) - .02, y1 = Math.max(a[1], b[1]) + .02;
   return loadReports().filter(r => (r.type === 'blocked' || r.type === 'works' || r.type === 'danger') && r.lng > x0 && r.lng < x1 && r.lat > y0 && r.lat < y1).slice(0, 20).map(r => [r.lng, r.lat]);
