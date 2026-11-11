@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.50';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.51';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -61,7 +61,7 @@ $('app').innerHTML = `
 <div id="sheet" class="panel glass" hidden>
   <div id="routeInfo"></div>
   <div class="chips" id="chips"></div><div class="chips" id="poiChips"></div>
-  <div class="speedrow">Vitesse de croisière<input id="avg" type="range" min="12" max="25" step="1"><output id="avgOut"></output></div>
+  <div class="speedrow">Vitesse de croisière<input id="avg" type="range" min="12" max="45" step="1"><output id="avgOut"></output></div>
   <div class="btns"><button id="cancel" class="btn sec">Annuler</button><button id="start" class="btn main">${I.go}Démarrer</button></div>
 </div>
 <div id="hud" class="panel glass" hidden>
@@ -115,7 +115,7 @@ function syncRoute(doneIdx) {
 // ---------- état ----------
 let me = null, hdg = null, meMarker = null, meEl = null, dest = null, destName = '', destMarker = null;
 let route = null, watchId = null, follow = true, seq = 0;
-const ride = { active: false, mode: 'free', dist: 0, t0: 0, moving: 0, max: 0, last: null, speed: 0, off: 0, idx: 0, lastReroute: 0 };
+const ride = { active: false, mode: 'free', dist: 0, t0: 0, moving: 0, max: 0, last: null, speed: 0, off: 0, idx: 0, lastReroute: 0, trk: [] };
 let hudTimer = null, wl = null, pendingApply = false;
 
 function toast(msg, ms = 2800) {
@@ -128,6 +128,10 @@ const fmtDist = m => m < 1000 ? Math.max(10, Math.round(m / 10) * 10) + ' m' : (
 const fmtTime = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}:${pad(m)}` : `${m}:${pad(s % 60)}`; };
 const fmtClock = t => { const d = new Date(t); return `${d.getHours()}h${pad(d.getMinutes())}`; };
 const avgSpeed = () => +store.get('avg', 20);
+// Limite du compteur : 25 km/h = EDPM légal en France par défaut ; réglable pour une trottinette
+// débridée ou un vélo électrique (la jauge adapte son échelle et son alerte). Sur voie publique, la loi reste la loi.
+const LIMS = [25, 32, 45, 60];
+const maxKmh = () => +store.get('maxkmh', 25);
 let routeMode = store.get('rmode', 'safe') === 'fast' ? 'fast' : 'safe'; // défaut : sécurisé
 
 function setState(s) {
@@ -362,7 +366,7 @@ document.addEventListener('visibilitychange', () => {
 
 function startRide(mode) {
   if (ride.active) return;
-  Object.assign(ride, { active: true, mode, dist: 0, t0: Date.now(), moving: 0, max: 0, last: null, speed: 0, off: 0, idx: 0, lastReroute: 0 });
+  Object.assign(ride, { active: true, mode, dist: 0, t0: Date.now(), moving: 0, max: 0, last: null, speed: 0, off: 0, idx: 0, lastReroute: 0, trk: [] });
   setState('ride'); wake(true); startWatch(); setFollow(true);
   $('results').hidden = true; $('q').blur();
   meEl && meEl.classList.toggle('hd', hdg != null);
@@ -370,7 +374,7 @@ function startRide(mode) {
   hudTick(); hudTimer = setInterval(hudTick, 1000);
   map.easeTo({ center: me || map.getCenter(), zoom: 17, pitch: 55, bearing: hdg || 0, duration: 1000 });
   if (mode === 'nav') navUpdate();
-  toast(mode === 'nav' ? 'C’est parti ! Max ' + CFG.maxKmh + ' km/h' : 'Compteur lancé – bonne route !');
+  toast(mode === 'nav' ? 'C’est parti ! Max ' + maxKmh() + ' km/h' : 'Compteur lancé – bonne route !');
   sc.stored() && sc.connect(true); // trottinette associée : batterie en direct pendant le trajet
 }
 $('ridebtn').onclick = () => startRide('free');
@@ -387,7 +391,10 @@ function trackRide(c, now) {
     const d = dist(prev.ll, me), v = d / dt * 3.6;
     if (v > 45) ride.last = { ll: me, t: now };                  // saut GPS : on ignore
     else if (d < Math.max(2.5, c.accuracy * .25) && (kmh == null || kmh < 2)) kmh = 0; // à l'arrêt : pas de dérive
-    else { ride.dist += d; if (dt < 15) ride.moving += dt; ride.last = { ll: me, t: now }; if (kmh == null) kmh = v; }
+    else {
+      ride.dist += d; if (dt < 15) ride.moving += dt; ride.last = { ll: me, t: now }; if (kmh == null) kmh = v;
+      if (!ride.trk.length || dist(ride.trk[ride.trk.length - 1], me) >= 15) ride.trk.push([+me[0].toFixed(5), +me[1].toFixed(5)]); // trace pour l'export GPX (1 pt / 15 m)
+    }
   }
   kmh = kmh == null ? 0 : kmh;
   ride.speed = ride.speed ? ride.speed * .4 + kmh * .6 : kmh;
@@ -399,8 +406,9 @@ function hudTick() {
   const el = (Date.now() - ride.t0) / 1000, sp = ride.speed < .8 ? 0 : ride.speed;
   $('odo').textContent = fmtKm(ride.dist);
   $('spd').textContent = Math.round(sp);
-  $('gfg').style.strokeDasharray = `${Math.min(sp / 30, 1) * 160} 214`;
-  $('gauge').classList.toggle('over', sp > CFG.maxKmh);
+  const lim = maxKmh(); // l'échelle de la jauge suit la limite (pleine à lim × 1,25)
+  $('gfg').style.strokeDasharray = `${Math.min(sp / (lim * 1.25), 1) * 160} 214`;
+  $('gauge').classList.toggle('over', sp > lim);
   $('tm').textContent = fmtTime(el);
   $('avgs').textContent = ride.moving > 5 ? (ride.dist / ride.moving * 3.6).toFixed(1).replace('.', ',') : '–';
   $('mx').textContent = Math.round(ride.max);
@@ -453,7 +461,7 @@ function endRide(arrived) {
   if (!ride.active) return;
   ride.active = false; clearInterval(hudTimer); wake(false); store.del('ride');
   const s = { km: ride.dist / 1000, secs: (Date.now() - ride.t0) / 1000, avg: ride.moving > 5 ? ride.dist / ride.moving * 3.6 : 0, max: ride.max };
-  if (s.km >= .02) addTotals(s);
+  if (s.km >= .02) { addTotals(s); pushRide(s, Date.now(), ride.trk); }
   const wasNav = ride.mode === 'nav';
   meEl && meEl.classList.remove('hd');
   if (wasNav) clearRoute(); else setState('idle');
@@ -463,6 +471,23 @@ function endRide(arrived) {
 function addTotals(s) {
   const t = store.get('totals', { km: 0, rides: 0, secs: 0 });
   t.km += s.km; t.rides++; t.secs += s.secs; store.set('totals', t);
+}
+function pushRide(s, t, trk) { // historique : 60 derniers trajets avec leur trace (allégée) pour l'export GPX
+  const rides = store.get('rides', []);
+  rides.push({ t: t || Date.now(), km: +s.km.toFixed(2), secs: Math.round(s.secs), avg: s.avg ? +s.avg.toFixed(1) : 0, max: Math.round(s.max), trk: trk || [] });
+  store.set('rides', rides.slice(-60));
+}
+async function dlGpx(r) { // export GPX : partage Android d'abord, téléchargement en repli (PWA)
+  const g = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Trotti" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Trotti ${new Date(r.t).toLocaleString('fr-FR')}</name><trkseg>${(r.trk || []).map(p => `<trkpt lat="${p[1]}" lon="${p[0]}"/>`).join('')}</trkseg></trk></gpx>`;
+  try {
+    const f = new File([g], 'trotti-' + new Date(r.t).toISOString().slice(0, 10) + '.gpx', { type: 'application/gpx+xml' });
+    if (navigator.canShare && navigator.canShare({ files: [f] })) return navigator.share({ files: [f], title: 'Trajet Trotti' });
+  } catch {}
+  try {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([g], { type: 'application/gpx+xml' })); a.download = 'trotti-' + new Date(r.t).toISOString().slice(0, 10) + '.gpx';
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch { toast('Export GPX impossible sur cet appareil'); }
 }
 
 // ---------- fenêtres ----------
@@ -482,14 +507,24 @@ function showSummary(s, arrived) {
 }
 $('statsBtn').onclick = () => {
   const t = store.get('totals', { km: 0, rides: 0, secs: 0 });
+  const rides = store.get('rides', []);
+  const histHtml = rides.length ? `<details class="sclog"><summary>Historique des trajets (${rides.length})</summary><div class="ridelist">${rides.slice(-40).reverse().map((r, i) => {
+    const d = new Date(r.t);
+    return `<div class="rideRow"><div><b>${fmtKm(r.km * 1000)} km</b><small>${d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })} · ${fmtTime(r.secs)} · max ${Math.round(r.max)} km/h${r.avg ? ' · moy ' + nb1(r.avg) : ''}</small></div>${r.trk && r.trk.length > 1 ? `<button class="chip mode" data-gpx="${rides.length - 1 - i}">GPX</button>` : ''}</div>`;
+  }).join('')}</div></details>` : '';
   const m = openModal(`<h3>Mes kilomètres</h3>
     <div class="bigstat"><div class="hero"><b>${fmtKm(t.km * 1000)} km</b><small>Total en trottinette</small></div>
     <div><b>${t.rides}</b><small>Trajets</small></div><div><b>${t.secs >= 3600 ? Math.floor(t.secs / 3600) + ' h ' + pad(Math.floor(t.secs % 3600 / 60)) : Math.floor(t.secs / 60) + ' min'}</b><small>Sur la route</small></div></div>
+    <div class="speedlim"><b>⚡ Limite du compteur</b><small>25 km/h = EDPM légal en France. À régler si ta monture va plus vite (débridée, vélo électrique) : la jauge adapte son échelle et son alerte. Sur voie publique, la loi reste la loi.</small>
+      <div class="chips" style="margin-top:8px">${LIMS.map(v => `<span class="chip mode ${v === maxKmh() ? 'ok' : ''}" data-lim="${v}">${v} km/h</span>`).join('')}</div></div>
+    ${histHtml}
     ${scPanelHtml()}
     <div class="about">Trotti v${V} · Cartes © OpenStreetMap, © CARTO · Itinéraires Valhalla · Adresses Photon</div>
     <button class="btn sec" id="chk" style="margin-bottom:10px">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`,
     () => { sc.panel = null; sc.renderHook = null; });
   scPanelWire(m);
+  m.querySelectorAll('[data-lim]').forEach(ch => ch.onclick = () => { store.set('maxkmh', +ch.dataset.lim); $('statsBtn').onclick(); }); // régénère le modal (puces + jauge à jour)
+  m.querySelectorAll('[data-gpx]').forEach(b => b.onclick = () => dlGpx(rides[+b.dataset.gpx]));
   m.querySelector('#chk').onclick = async e => {
     e.target.textContent = 'Vérification…';
     const r = await (window.TrottiBoot && TrottiBoot.check ? TrottiBoot.check() : 'none');
@@ -1514,9 +1549,9 @@ store.set('lastv', V);
 
 // ---------- démarrage ----------
 const old = store.get('ride', null);
-if (old && old.dist > 20) {            // trajet interrompu (appli fermée) : on le garde dans les totaux
+if (old && old.dist > 20) {            // trajet interrompu (appli fermée) : on le garde dans les totaux et l'historique
   const s = { km: old.dist / 1000, secs: Math.max(1, (old.saved - old.t0) / 1000), avg: old.moving > 5 ? old.dist / old.moving * 3.6 : 0, max: old.max };
-  addTotals(s); setTimeout(() => showSummary(s, false), 1500);
+  addTotals(s); pushRide(s, old.saved, []); setTimeout(() => showSummary(s, false), 1500);
 }
 store.del('ride');
 setState('idle');

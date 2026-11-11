@@ -26,6 +26,8 @@ Trotti.apk  dernier APK installable
 
 **Changement de socle (rare) :** augmenter `SHELL_REV` dans `boot.js` et `apk.rev` / `apk.v` dans `version.json`, regénérer l'APK (ci-dessous), le remplacer `Trotti.apk`, pousser.
 Mettre aussi `BUNDLED_V` (boot.js) à la version embarquée.
+Depuis la 1.4.51 : `versionCode`/`versionName` sont lus automatiquement depuis `www/version.json` (plus de désynchro possible), et `boot.js` vérifie le sha256 du bundle OTA (`sha` dans `version.json`, mis à jour par `node tools/check-version.mjs --fix`).
+À faire au prochain socle : migrer `Trotti.apk` vers GitHub Releases (URL `releases/latest/download/Trotti.apk` dans `version.json`) pour arrêter de committer 4,4 Mo à chaque release, et éventuellement un widget d'écran d'accueil (natif).
 
 ## Construire l'APK
 
@@ -40,6 +42,13 @@ Signer toujours avec la **même clé** (sinon Android refuse la mise à jour par
 
 Bouton « calques » : snacks/fast-food, restos/cafés/boulangeries, réparateurs trottinette-vélo-moto, affichés le long de l'itinéraire
 (couloir de 100 m) ou autour de soi sans itinéraire. Données OpenStreetMap via Overpass (plusieurs serveurs en secours).
+
+## Mes kilomètres
+
+Totaux, **historique des 60 derniers trajets** (date, distance, durée, vitesse max) avec **export GPX** de la trace
+(enregistrée à 1 point / 15 m pendant les trajets), et **limite du compteur réglable** (25 km/h légal par défaut ;
+32/45/60 pour une trottinette débridée ou un vélo électrique — la jauge adapte son échelle et son alerte).
+La vitesse de croisière de l'itinéraire va jusqu'à 45 km/h.
 
 ## Itinéraire
 

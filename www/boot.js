@@ -62,6 +62,10 @@
       if (cmp(rv.v, boot.version) <= 0 || rv.v === localStorage.getItem('trotti.badv') || (rv.minShell || 1) > SHELL_REV) return res; // déjà à jour
       const [js, css] = await Promise.all([get('app.js'), get('style.css')]);
       if (js.length < 2000 || css.length < 200) throw new Error('bundle incomplet');
+      if (rv.sha) { // intégrité du bundle (sha256) — les anciens socles ignorent ce champ
+        const dig = async s => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map(x => x.toString(16).padStart(2, '0')).join('');
+        if (await dig(js) !== rv.sha.js || await dig(css) !== rv.sha.css) throw new Error('bundle corrompu (sha256)');
+      }
       localStorage.setItem(KEY, JSON.stringify({ v: rv.v, js, css }));
       boot.pending = rv.v;
       window.dispatchEvent(new CustomEvent('trotti-update', { detail: { type: 'web', v: rv.v } }));

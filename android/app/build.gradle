@@ -7,8 +7,12 @@ android {
         applicationId "fr.trotti.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "1.4.3"
+        // Version lue dans www/version.json (source unique de vérité, vérifiée par la CI) :
+        // x.y.z → versionCode x*1_000_000 + y*1000 + z (toujours croissant, > 8)
+        def vj = new groovy.json.JsonSlurper().parseText(file('../../www/version.json').text)
+        def vc = vj.v.split('\\.').collect { it as int }
+        versionCode vc[0] * 1000000 + vc[1] * 1000 + vc[2]
+        versionName vj.v
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
