@@ -17,7 +17,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.55';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.56';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -258,9 +258,29 @@ function pick(f) {
   $('results').hidden = true; $('q').value = title; $('q').blur(); $('clear').hidden = false;
   setDest(f.geometry.coordinates, title);
 }
+// ---------- favoris & destinations récentes (visibles dès le focus sur la recherche) ----------
+const lastDests = () => store.get('lastdests', []);
+function rememberDest(ll, name) {
+  const L = lastDests().filter(d => d.name !== name);
+  L.push({ name, ll, t: Date.now() });
+  store.set('lastdests', L.slice(-6));
+}
+function showFavResults() { // champ vide → favoris ⭐ puis destinations récentes
+  const ul = $('results');
+  const favs = trips().map(tp => ({ name: tp.name, ll: tp.end, fav: true }));
+  const rec = lastDests().slice().reverse().map(d => ({ name: d.name, ll: d.ll, fav: false })).filter(d => !favs.some(f => f.name === d.name));
+  const list = [...favs, ...rec].slice(0, 8);
+  if (!list.length) return (ul.hidden = true);
+  ul.innerHTML = list.map(d => `<li><div class="pi">${d.fav ? '⭐' : '🕘'}</div><div><b></b><small>${d.fav ? 'favori' : 'récemment'}</small></div></li>`).join('');
+  [...ul.children].forEach((li, i) => {
+    li.querySelector('b').textContent = list[i].name;
+    li.onclick = () => { ul.hidden = true; $('q').value = list[i].name; $('q').blur(); $('clear').hidden = false; setDest(list[i].ll, list[i].name); };
+  });
+  ul.hidden = false;
+}
 async function runSearch(immediate) {
   const q = $('q').value.trim();
-  if (q.length < 3) { $('results').hidden = true; return; }
+  if (q.length < 3) return showFavResults(); // champ trop court → favoris ⭐ + récents
   try {
     const list = await suggest(q);
     if (immediate && list.length) return pick(list[0]);
@@ -270,6 +290,7 @@ async function runSearch(immediate) {
 $('q').addEventListener('input', () => {
   $('clear').hidden = !$('q').value; clearTimeout(sugTimer); sugTimer = setTimeout(() => runSearch(false), 300);
 });
+$('q').addEventListener('focus', () => { if ($('q').value.trim().length < 3) showFavResults(); }); // ⭐ dès le focus
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(sugTimer); runSearch(true); } });
 $('go').onclick = () => runSearch(true);
 $('clear').onclick = () => { $('q').value = ''; $('clear').hidden = true; $('results').hidden = true; $('q').focus(); };
@@ -345,6 +366,7 @@ function placeDest() {
 async function setDest(ll, name) {
   if (ride.active) return toast('Termine d’abord ton trajet en cours');
   dest = ll; destName = name || 'Destination'; placeDest();
+  rememberDest(dest, destName);
   if (!me) { toast('Recherche de ta position GPS…'); startWatch(); await waitFix(8000); }
   if (!me) { map.flyTo({ center: dest, zoom: 14 }); return toast('Position GPS indisponible'); }
   await computeRoute(true);
@@ -373,12 +395,15 @@ function showSheet() {
   $('routeInfo').innerHTML = `<div class="big">${min}<small>min</small></div><div class="km"><b>${fmtDist(route.distance)}</b><br>arrivée ${fmtClock(Date.now() + min * 60e3)}</div>`;
   const modeChip = (m, label) => `<span class="chip mode ${routeMode === m ? 'ok' : ''}" data-m="${m}" title="${m === 'safe' ? 'Pistes et voies cyclables en priorité' : 'Le trajet le plus court en temps'}">${label}</span>`;
   const voiceChip = TTS ? `<span class="chip mode ${voiceOn() ? 'ok' : ''}" data-voice="1" title="Annonces vocales : manœuvres, dangers, arrivée">🔊 Voix</span>` : '';
-  $('chips').innerHTML = modeChip('safe', '🛡 Sécurisé') + modeChip('fast', '⚡ Rapide') + voiceChip + `<span class="chip">${I.pin}${esc(destName)}</span>` +
+  const favChip = `<span class="chip mode ${trips().some(tp => tp.fav && dist(tp.end, dest) < 50) ? 'ok' : ''}" data-fav="1" title="Ajouter cette destination aux favoris (visible en tête de la recherche)">⭐ Garder</span>`;
+  $('chips').innerHTML = modeChip('safe', '🛡 Sécurisé') + modeChip('fast', '⚡ Rapide') + voiceChip + favChip + `<span class="chip">${I.pin}${esc(destName)}</span>` +
     (n ? `<span class="chip warn">${I.alert}${n} signalement${n > 1 ? 's' : ''}</span>` : '');
 }
-$('chips').addEventListener('click', e => { // puce voix + bascule Sécurisé / Rapide
+$('chips').addEventListener('click', e => { // puces voix / favori + bascule Sécurisé / Rapide
   const v = e.target.closest('[data-voice]');
   if (v) { const on = !voiceOn(); store.set('voice', on ? 1 : 0); showSheet(); on ? say('Guidage vocal activé') : toast('Guidage vocal coupé 🔇'); return; }
+  const fv = e.target.closest('[data-fav]');
+  if (fv) { keepDestPrompt(); return; }
   const b = e.target.closest('[data-m]');
   if (!b || b.dataset.m === routeMode) return;
   routeMode = b.dataset.m; store.set('rmode', routeMode);
@@ -601,9 +626,27 @@ function makeRoute(coords, duration) { // objet route depuis une trace (pas de m
   r.distance = r.cum[r.cum.length - 1];
   return r;
 }
-function goTrip(tp, closeModal) { // naviguer en suivant TON itinéraire enregistré
+function saveDestFav(name, ll) {
+  const T = trips();
+  if (T.some(tp => tp.fav && dist(tp.end, ll) < 50)) return toast('Cette destination est déjà en favori ⭐');
+  T.push({ id: Date.now(), name, start: null, end: ll, km: 0, secs: 0, best: 0, n: 0, t: Date.now(), trk: [], fav: true });
+  store.set('trips', T.slice(-15));
+  toast('« ' + name + ' » ajouté aux favoris ⭐');
+}
+function keepDestPrompt() { // favori = destination simple (sans rouler) : ⭐ dans la fiche itinéraire
+  const ll = dest, nm = destName;
+  if (!ll) return;
+  const m = openModal(`<h3>⭐ Garder cette destination</h3><div class="about" style="margin-top:-6px">Elle apparaîtra en tête de la recherche (⭐) et dans « Mes trajets ». « Y aller » calculera l’itinéraire du moment.</div>
+    <input id="dn" autocomplete="off" value="${esc(nm)}" style="width:100%;font:15px inherit;padding:11px;border-radius:12px;border:1px solid var(--bd);background:var(--chip);color:var(--fg)">
+    <div class="btns"><button class="btn sec" data-close>Annuler</button><button class="btn main" id="dnGo">Garder</button></div>`);
+  const go = () => { const n = m.querySelector('#dn').value.trim(); if (!n) return toast('Donne-lui un nom'); saveDestFav(n, ll); m.hidden = true; m.innerHTML = ''; showSheet(); };
+  m.querySelector('#dnGo').onclick = go;
+  m.querySelector('#dn').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
+function goTrip(tp, closeModal) { // ▶ : suivre la trace enregistrée, ou itinéraire calculé pour un favori-destination
   if (ride.active) return toast('Termine d’abord ton trajet en cours');
   closeModal && closeModal();
+  if (tp.fav || !tp.trk || tp.trk.length < 2) { $('q').value = tp.name; $('clear').hidden = false; return void setDest(tp.end, tp.name); }
   dest = tp.end; destName = tp.name; placeDest();
   route = makeRoute(tp.trk, tp.secs); syncRoute(); fitRoute();
   showSheet(); setState('route'); refreshPois();
@@ -707,7 +750,10 @@ $('statsBtn').onclick = () => {
     return `<div class="rideRow"><div><b>${fmtKm(r.km * 1000)} km</b><small>${d.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })} · ${fmtTime(r.secs)} · max ${Math.round(r.max)} km/h${r.avg ? ' · moy ' + nb1(r.avg) : ''}</small></div>${r.trk && r.trk.length > 1 ? `<button class="chip mode" data-gpx="${rides.length - 1 - i}">GPX</button>` : ''}</div>`;
   }).join('')}</div></details>` : '';
   const T = trips();
-  const tripsHtml = T.length ? `<details class="sclog"><summary>Mes trajets ⭐ (${T.length})</summary><div class="ridelist">${T.map(tp => `<div class="rideRow tripRow"><div><b>${esc(tp.name)}</b><small>${nb1(tp.km)} km · record ${fmtTime(tp.best)} · ${tp.n}× · dern. ${new Date(tp.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</small></div><span class="chip mode" data-go="${tp.id}" title="Naviguer sur cet itinéraire">▶</span><span class="chip mode" data-db="${tp.id}" title="Débrief : mon trajet vs proposé">⚖️</span><span class="chip mode" data-del="${tp.id}" title="Supprimer">✕</span></div>`).join('')}</div></details>` : '';
+  const tripsHtml = `<details class="sclog"${T.length ? '' : ' open'}><summary>Mes trajets ⭐ (${T.length})</summary>${T.length ? `<div class="ridelist">${T.map(tp => tp.fav
+    ? `<div class="rideRow tripRow"><div><b>${esc(tp.name)}</b><small>⭐ favori · destination</small></div><span class="chip mode" data-go="${tp.id}" title="Y aller">▶</span><span class="chip mode" data-del="${tp.id}" title="Supprimer">✕</span></div>`
+    : `<div class="rideRow tripRow"><div><b>${esc(tp.name)}</b><small>${nb1(tp.km)} km · record ${fmtTime(tp.best)} · ${tp.n}× · dern. ${new Date(tp.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</small></div><span class="chip mode" data-go="${tp.id}" title="Naviguer sur TON itinéraire">▶</span><span class="chip mode" data-db="${tp.id}" title="Débrief : mon trajet vs proposé">⚖️</span><span class="chip mode" data-del="${tp.id}" title="Supprimer">✕</span></div>`).join('')}</div>`
+    : `<div class="about" style="margin:8px 2px">Aucun favori. Deux façons d'en créer :<br>• <b>⭐ Garder</b> dans la fiche itinéraire (une destination, sans rouler),<br>• <b>⭐ Garder ce trajet</b> dans le résumé après un trajet (ton itinéraire complet, avec débrief et record).</div>`}</details>`;
   const m = openModal(`<h3>Mes kilomètres</h3>
     <div class="bigstat"><div class="hero"><b>${fmtKm(t.km * 1000)} km</b><small>Total en trottinette</small></div>
     <div><b>${t.rides}</b><small>Trajets</small></div><div><b>${t.secs >= 3600 ? Math.floor(t.secs / 3600) + ' h ' + pad(Math.floor(t.secs % 3600 / 60)) : Math.floor(t.secs / 60) + ' min'}</b><small>Sur la route</small></div></div>
