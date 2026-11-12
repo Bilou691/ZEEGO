@@ -7,6 +7,7 @@ const CFG = {
   valhalla: 'https://valhalla1.openstreetmap.de/route',     // moteur d'itinéraire (profil vélo)
   osrm: 'https://routing.openstreetmap.de/routed-bike/route/v1/driving/', // secours
   photon: 'https://photon.komoot.io/api/',                  // recherche d'adresses (autocomplétion)
+  ban: 'https://api-adresse.data.gouv.fr/search/',           // adresses officielles françaises (prioritaires)
   nominatim: 'https://nominatim.openstreetmap.org/search',  // repli si Photon (service communautaire) ne répond pas
   overpass: ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'], // POI OSM
   styleLight: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
@@ -17,7 +18,7 @@ const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.58';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.59';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -253,20 +254,36 @@ async function suggestNominatim(q) { // repli : Nominatim (OSM officiel), reform
     geometry: { coordinates: [+p.lon, +p.lat] }
   }));
 }
+async function suggestBan(q, near, signal) { // Base Adresse Nationale : la référence pour les numéros de rue en France
+  const r = await fetch(`${CFG.ban}?q=${encodeURIComponent(q)}&limit=5${near}`, { signal });
+  return ((await r.json()).features || []).map(f => {
+    const p = f.properties, addr = p.type === 'housenumber' || p.type === 'street';
+    return { geometry: f.geometry, properties: { name: addr ? null : p.name, housenumber: p.housenumber, street: p.street || (p.type === 'street' ? p.name : null), postcode: p.postcode, city: p.city } };
+  });
+}
+async function suggestPlaces(q, near, ctl) { // lieux et commerces : Photon, puis Nominatim s'il reste muet 5 s
+  const to = setTimeout(() => ctl.abort(), 5000);
+  try {
+    const r = await fetch(`${CFG.photon}?q=${encodeURIComponent(q)}&lang=fr&limit=6&bbox=-5.6,41.2,10,51.2${near}`, { signal: ctl.signal });
+    return (await r.json()).features || [];
+  } catch (e) {
+    if (sugCtl !== ctl) throw e; // une recherche plus récente a déjà pris le relais
+    return suggestNominatim(q).catch(() => []);
+  } finally { clearTimeout(to); }
+}
 async function suggest(q) {
   if (sugCtl) sugCtl.abort();
   const ctl = sugCtl = new AbortController();
   const near = me ? `&lat=${me[1]}&lon=${me[0]}` : '';
-  const to = setTimeout(() => ctl.abort(), 5000); // Photon (service communautaire) peut rester muet : on bascule après 5 s
-  try {
-    const r = await fetch(`${CFG.photon}?q=${encodeURIComponent(q)}&lang=fr&limit=6&bbox=-5.6,41.2,10,51.2${near}`, { signal: ctl.signal });
-    clearTimeout(to);
-    return (await r.json()).features || [];
-  } catch (e) {
-    clearTimeout(to);
-    if (sugCtl !== ctl) throw e; // une recherche plus récente a déjà pris le relais : on abandonne celle-ci
-    return suggestNominatim(q);
+  const [ban, places] = await Promise.all([suggestBan(q, near, ctl.signal).catch(() => []), suggestPlaces(q, near, ctl)]);
+  if (sugCtl !== ctl) throw new DOMException('remplacée', 'AbortError');
+  const first = /^\d/.test(q) ? [ban, places] : [places, ban]; // numéro en tête → adresse d'abord, sinon lieu d'abord
+  const out = [];
+  for (const f of [...first[0], ...first[1]]) {
+    if (out.some(o => dist(o.geometry.coordinates, f.geometry.coordinates) < 40)) continue; // doublon entre les deux sources
+    out.push(f);
   }
+  return out.slice(0, 6);
 }
 function showResults(list) {
   const ul = $('results'); ul.innerHTML = '';
