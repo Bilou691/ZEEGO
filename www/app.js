@@ -10,14 +10,13 @@ const CFG = {
   overpass: ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'], // POI OSM
   styleLight: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
   styleDark: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-  maxKmh: 25,                                               // limite légale EDPM en France
   reportTtlH: 48
 };
 const REPORT_TYPES = {
   pothole: ['🕳️', 'Nid-de-poule', '#a16207'], works: ['🚧', 'Travaux', '#f59e0b'], police: ['👮', 'Contrôle', '#3b82f6'],
   danger: ['⚠️', 'Danger', '#ef4444'], blocked: ['⛔', 'Piste bloquée', '#dc2626'], cobble: ['🧱', 'Pavés', '#a8a29e']
 };
-const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.56';
+const V = (window.TrottiBoot && TrottiBoot.version) || '1.4.57';
 const $ = id => document.getElementById(id);
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem('trotti.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
@@ -64,17 +63,11 @@ $('app').innerHTML = `
   <div class="speedrow">Vitesse de croisière<input id="avg" type="range" min="12" max="45" step="1"><output id="avgOut"></output></div>
   <div class="btns"><button id="cancel" class="btn sec">Annuler</button><button id="start" class="btn main">${I.go}Démarrer</button></div>
 </div>
-<div id="hud" class="panel glass" hidden>
-  <div class="top">
-    <div class="odo"><div class="lbl">Compteur du trajet</div><div class="val"><span id="odo">0,00</span><small>km</small></div></div>
-    <div class="batcell" id="batCell" hidden title="Batterie trottinette"><div class="batbar"><i id="batFill"></i></div><span><b id="batPct">–</b><small>%</small></span></div>
-    <div class="gauge" id="gauge"><svg viewBox="0 0 96 96"><defs><linearGradient id="gg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/></linearGradient></defs>
-      <circle class="bg" cx="48" cy="48" r="34"/><circle class="fg" id="gfg" cx="48" cy="48" r="34"/></svg>
-      <div class="n"><b id="spd">0</b><small>km/h</small></div></div>
-  </div>
-  <div class="stats3"><div><b id="tm">0:00</b><small>Durée</small></div><div><b id="avgs">–</b><small>Moy. km/h</small></div><div><b id="mx">0</b><small>Max km/h</small></div></div>
-  <div class="remain" id="remain" hidden></div>
-  <div class="btns"><button id="end" class="btn stop">Terminer le trajet</button></div>
+<div id="hud" class="hudmini glass" hidden>
+  <div class="hspd" id="hudSpd"><b id="spd">0</b><small>km/h</small></div>
+  <div class="batcell" id="batCell" hidden title="Batterie trottinette"><div class="batbar"><i id="batFill"></i></div><span><b id="batPct">–</b><small>%</small></span></div>
+  <div class="heta" id="remain" hidden></div>
+  <button id="end" class="hend" aria-label="Terminer le trajet">${I.flag}</button>
 </div>
 <div id="banner" class="glass" hidden></div>
 <div id="modal" class="modal" hidden></div>
@@ -140,9 +133,18 @@ function setState(s) {
   $('hud').hidden = s !== 'ride';
   $('ridebtn').hidden = s !== 'idle';
   $('nav').hidden = !(s === 'ride' && ride.mode === 'nav');
+  if (s !== 'ride') $('nav').classList.remove('near');
+  $('fabs').classList.toggle('dim', s === 'ride'); // en roulant : boutons estompés, la carte prend toute la place
   updatePanel();
   if (s === 'idle' && pendingApply) applyUpdate();
 }
+let fabsRevealT;
+function revealFabs() { // réapparition temporaire au toucher de la carte pendant un trajet
+  if (document.body.dataset.s !== 'ride') return;
+  $('fabs').classList.remove('dim'); clearTimeout(fabsRevealT);
+  fabsRevealT = setTimeout(() => $('fabs').classList.add('dim'), 3000);
+}
+['touchstart', 'mousedown', 'wheel'].forEach(ev => map.getCanvas().addEventListener(ev, revealFabs, { passive: true }));
 function updatePanel() {
   const p = [$('sheet'), $('hud')].find(x => !x.hidden);
   document.documentElement.style.setProperty('--panel', (p ? p.offsetHeight : 92) + 'px');
@@ -477,16 +479,10 @@ function trackRide(c, now) {
   checkReportsAhead(); // nids-de-poule, contrôles… juste devant nous → vibre + voix
   if (ride.mode === 'nav') navUpdate();
 }
-function hudTick() {
+function hudTick() { // panneau allégé : seules la vitesse et l'arrivée restent visibles en roulant ; durée/moyenne/max sont calculées mais affichées seulement au bilan de fin de trajet
   const el = (Date.now() - ride.t0) / 1000, sp = ride.speed < .8 ? 0 : ride.speed;
-  $('odo').textContent = fmtKm(ride.dist);
   $('spd').textContent = Math.round(sp);
-  const lim = maxKmh(); // l'échelle de la jauge suit la limite (pleine à lim × 1,25)
-  $('gfg').style.strokeDasharray = `${Math.min(sp / (lim * 1.25), 1) * 160} 214`;
-  $('gauge').classList.toggle('over', sp > lim);
-  $('tm').textContent = fmtTime(el);
-  $('avgs').textContent = ride.moving > 5 ? (ride.dist / ride.moving * 3.6).toFixed(1).replace('.', ',') : '–';
-  $('mx').textContent = Math.round(ride.max);
+  $('hudSpd').classList.toggle('over', sp > maxKmh());
   if (Math.round(el) % 5 === 0) store.set('ride', { t0: ride.t0, dist: ride.dist, moving: ride.moving, max: ride.max, saved: Date.now() });
 }
 
@@ -546,16 +542,18 @@ function navUpdate() {
   ride.off = p.d > 45 ? ride.off + 1 : 0;
   syncRoute(p.i);
   const rem = Math.max(0, route.distance - p.along), remMin = route.duration * (rem / route.distance) / 60;
-  $('remain').innerHTML = `Reste <b>${fmtDist(rem)}</b> · arrivée <b>${fmtClock(Date.now() + remMin * 60e3)}</b>`;
+  $('remain').innerHTML = `<b>${Math.max(1, Math.round(remMin))} min</b> · ${fmtClock(Date.now() + remMin * 60e3)}`;
   const ms = route.maneuvers, next = ms.find(m => m.begin > p.i);
+  // Bandeau de virage discret : masqué sauf à l'approche (≤300 m) pour laisser voir la carte le reste du temps.
+  const nextDist = next ? route.cum[next.begin] - p.along : rem;
+  $('nav').classList.toggle('near', nextDist <= 300);
   if (next && next.type !== 4 && next.type !== 5 && next.type !== 6) {
     $('navIcon').innerHTML = I.arrow; $('navIcon').firstChild.style.transform = `rotate(${turnAngle(next.type)}deg)`;
-    const dm = route.cum[next.begin] - p.along;
-    $('navDist').textContent = fmtDist(dm); $('navText').textContent = next.text;
+    $('navDist').textContent = fmtDist(nextDist); $('navText').textContent = next.text;
     if (navSay.i !== next.begin) navSay = { i: next.begin, far: false, near: false }; // une annonce loin + une proche, par manœuvre
     const kmh = Math.max(ride.speed, 8), farD = Math.max(150, kmh * 6), nearD = Math.max(40, kmh * 1.5);
-    if (!navSay.far && dm < farD) { navSay.far = true; say('Dans ' + Math.round(dm / 10) * 10 + ' mètres, ' + next.text, true); navigator.vibrate?.(50); }
-    else if (!navSay.near && dm < nearD) { navSay.near = true; say(next.text, true); navigator.vibrate?.([40, 40, 40]); }
+    if (!navSay.far && nextDist < farD) { navSay.far = true; say('Dans ' + Math.round(nextDist / 10) * 10 + ' mètres, ' + next.text, true); navigator.vibrate?.(50); }
+    else if (!navSay.near && nextDist < nearD) { navSay.near = true; say(next.text, true); navigator.vibrate?.([40, 40, 40]); }
   } else {
     $('navIcon').innerHTML = I.flag; $('navDist').textContent = fmtDist(rem); $('navText').textContent = 'Arrivée : ' + destName;
   }
@@ -757,17 +755,14 @@ $('statsBtn').onclick = () => {
   const m = openModal(`<h3>Mes kilomètres</h3>
     <div class="bigstat"><div class="hero"><b>${fmtKm(t.km * 1000)} km</b><small>Total en trottinette</small></div>
     <div><b>${t.rides}</b><small>Trajets</small></div><div><b>${t.secs >= 3600 ? Math.floor(t.secs / 3600) + ' h ' + pad(Math.floor(t.secs % 3600 / 60)) : Math.floor(t.secs / 60) + ' min'}</b><small>Sur la route</small></div></div>
-    <div class="speedlim"><b>⚡ Limite du compteur</b><small>25 km/h = EDPM légal en France. À régler si ta monture va plus vite (débridée, vélo électrique) : la jauge adapte son échelle et son alerte. Sur voie publique, la loi reste la loi.</small>
-      <div class="chips" style="margin-top:8px">${LIMS.map(v => `<span class="chip mode ${v === maxKmh() ? 'ok' : ''}" data-lim="${v}">${v} km/h</span>`).join('')}</div></div>
     ${histHtml}
     ${tripsHtml}
-    ${scPanelHtml()}
+    <button class="btn sec" id="openSettings" style="margin-bottom:10px">⚙️ Paramètres</button>
     <div class="about">Trotti v${V} · Cartes © OpenStreetMap, © CARTO · Itinéraires Valhalla · Adresses Photon</div>
     <div class="btns"><button class="btn sec" id="exp">💾 Exporter mes données</button><button class="btn sec" id="imp">Importer</button></div>
     <input type="file" id="impF" accept="application/json,.json" hidden>
-    <button class="btn sec" id="chk" style="margin:10px 0">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`,
-    () => { sc.panel = null; sc.renderHook = null; });
-  scPanelWire(m);
+    <button class="btn main" data-close>Fermer</button>`);
+  m.querySelector('#openSettings').onclick = () => { m.hidden = true; m.innerHTML = ''; openSettings(); };
   m.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { const tp = trips().find(x => x.id === +b.dataset.go); tp && goTrip(tp, () => { m.hidden = true; m.innerHTML = ''; }); });
   m.querySelectorAll('[data-db]').forEach(b => b.onclick = () => { const tp = trips().find(x => x.id === +b.dataset.db); tp && showDebrief(tp); });
   m.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
@@ -778,8 +773,17 @@ $('statsBtn').onclick = () => {
   const imp = m.querySelector('#imp');
   imp.onclick = () => { if (imp.dataset.c) m.querySelector('#impF').click(); else { imp.dataset.c = '1'; imp.textContent = 'Remplacer tout ?'; setTimeout(() => { delete imp.dataset.c; imp.textContent = 'Importer'; }, 2500); } };
   m.querySelector('#impF').onchange = e => { e.target.files[0] && importData(e.target.files[0]); };
-  m.querySelectorAll('[data-lim]').forEach(ch => ch.onclick = () => { store.set('maxkmh', +ch.dataset.lim); $('statsBtn').onclick(); }); // régénère le modal (puces + jauge à jour)
   m.querySelectorAll('[data-gpx]').forEach(b => b.onclick = () => dlGpx(rides[+b.dataset.gpx]));
+};
+function openSettings() {
+  const m = openModal(`<h3>⚙️ Paramètres</h3>
+    <div class="speedlim"><b>⚡ Limite du compteur</b><small>25 km/h = EDPM légal en France. À régler si ta monture va plus vite (débridée, vélo électrique) : le repère de vitesse s'adapte. Sur voie publique, la loi reste la loi.</small>
+      <div class="chips" style="margin-top:8px">${LIMS.map(v => `<span class="chip mode ${v === maxKmh() ? 'ok' : ''}" data-lim="${v}">${v} km/h</span>`).join('')}</div></div>
+    ${scPanelHtml()}
+    <button class="btn sec" id="chk" style="margin:14px 0 10px">Chercher une mise à jour</button><button class="btn main" data-close>Fermer</button>`,
+    () => { sc.panel = null; sc.renderHook = null; });
+  scPanelWire(m);
+  m.querySelectorAll('[data-lim]').forEach(ch => ch.onclick = () => { store.set('maxkmh', +ch.dataset.lim); m.hidden = true; m.innerHTML = ''; openSettings(); }); // régénère le modal (puces à jour)
   m.querySelector('#chk').onclick = async e => {
     e.target.textContent = 'Vérification…';
     const r = await (window.TrottiBoot && TrottiBoot.check ? TrottiBoot.check() : 'none');
@@ -1419,7 +1423,7 @@ function scPanelWire(m) {
     else { e.target.textContent = 'Connexion…'; await sc.connect(); e.target.textContent = sc.state === 'live' ? 'Actualiser' : 'Connecter'; }
   };
   m.querySelector('#scForget').onclick = async e => {
-    if (e.target.dataset.c) { await sc.forget(); $('statsBtn').onclick(); }
+    if (e.target.dataset.c) { await sc.forget(); openSettings(); }
     else { e.target.textContent = 'Confirmer ?'; e.target.dataset.c = '1'; setTimeout(() => { e.target.textContent = 'Oublier'; delete e.target.dataset.c; }, 2500); }
   };
   const diag = m.querySelector('#bleBtn'); diag && (diag.onclick = () => bleDiag());
